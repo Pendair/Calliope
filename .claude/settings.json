@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(npm run *)",
+      "Bash(npm test *)",
+      "Bash(.venv/Scripts/python -m pytest *)",
+      "Bash(.venv/Scripts/python -m ruff *)"
+    ],
+    "ask": [
+      "Bash(git push *)"
+    ],
+    "deny": [
+      "Bash(git push --force *)",
+      "Read(./calliope-backend/calliope_config.json)"
+    ]
+  }
+}
