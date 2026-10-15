@@ -1198,6 +1198,13 @@ export const en = {
 	'settings.roleAssetsHint': 'Produces character, location, and item reference images.',
 	'settings.roleVideo': 'Video',
 	'settings.roleVideoHint': 'Rewrites the prompts used for video generation.',
+	// --- H3 motion-context chain ---
+	'chain.latentAuto': 'Filled automatically from the clip chain',
+	'chain.aria': 'Motion-context chain',
+	'chain.starts': 'Starts a chain',
+	'chain.continues': 'Continues from {label}',
+	'chain.startHere': 'Start a new chain here',
+	'chain.stale': '{label} was re-rendered after this clip continued it. Re-render this clip to match.',
 };
 
 export type Dict = typeof en;

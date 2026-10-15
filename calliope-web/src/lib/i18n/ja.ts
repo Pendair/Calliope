@@ -1198,4 +1198,11 @@ export const ja: Dict = {
 	'settings.roleAssetsHint': 'キャラクター・ロケーション・アイテムの参照画像を生成します。',
 	'settings.roleVideo': '動画',
 	'settings.roleVideoHint': '動画生成に使うプロンプトを書き換えます。',
+	// --- H3 motion-context chain ---
+	'chain.latentAuto': 'クリップチェーンから自動入力',
+	'chain.aria': 'モーションコンテキストのチェーン',
+	'chain.starts': 'チェーンの開始',
+	'chain.continues': '{label} から継続',
+	'chain.startHere': 'ここで新しいチェーンを開始',
+	'chain.stale': 'このクリップが継続した後に {label} が再レンダリングされました。合わせるにはこのクリップを再レンダリングしてください。',
 };

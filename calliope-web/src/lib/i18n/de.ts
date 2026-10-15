@@ -1198,4 +1198,11 @@ export const de: Dict = {
 	'settings.roleAssetsHint': 'Erzeugt Referenzbilder für Charaktere, Schauplätze und Objekte.',
 	'settings.roleVideo': 'Video',
 	'settings.roleVideoHint': 'Schreibt die für die Videogenerierung verwendeten Prompts um.',
+	// --- H3 motion-context chain ---
+	'chain.latentAuto': 'Wird automatisch aus der Clip-Kette gefüllt',
+	'chain.aria': 'Bewegungskontext-Kette',
+	'chain.starts': 'Beginnt eine Kette',
+	'chain.continues': 'Setzt {label} fort',
+	'chain.startHere': 'Hier eine neue Kette beginnen',
+	'chain.stale': '{label} wurde neu gerendert, nachdem dieser Clip daran angeschlossen hat. Rendere diesen Clip neu, damit er passt.',
 };

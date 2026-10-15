@@ -23,11 +23,15 @@ INPUT_ROLE_ALIASES: dict[str, frozenset[str]] = {
     "audio": frozenset({"audio", "sound", "sfx"}),
     "seed": frozenset({"seed"}),
     "duration": frozenset({"duration", "dur", "length", "seconds"}),
+    # H3 motion-context Load Latent: filled by Calliope's chain resolution.
+    "latent": frozenset({"latent"}),
 }
 
 OUTPUT_ROLE_ALIASES: dict[str, frozenset[str]] = {
     "image": frozenset({"image", "img"}),
     "video": frozenset({"video", "vid"}),
+    # H3 motion-context Save Latent: collected into assets/<project>/latent/.
+    "latent": frozenset({"latent"}),
 }
 
 

@@ -1198,4 +1198,11 @@ export const ko: Dict = {
 	'settings.roleAssetsHint': '캐릭터, 장소, 아이템 참조 이미지를 생성합니다.',
 	'settings.roleVideo': '비디오',
 	'settings.roleVideoHint': '비디오 생성에 사용할 프롬프트를 재작성합니다.',
+	// --- H3 motion-context chain ---
+	'chain.latentAuto': '클립 체인에서 자동으로 채워짐',
+	'chain.aria': '모션 컨텍스트 체인',
+	'chain.starts': '체인 시작',
+	'chain.continues': '{label}에서 이어짐',
+	'chain.startHere': '여기서 새 체인 시작',
+	'chain.stale': '이 클립이 이어받은 뒤 {label}이(가) 다시 렌더링되었습니다. 맞추려면 이 클립을 다시 렌더링하세요.',
 };

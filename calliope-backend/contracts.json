@@ -31,13 +31,15 @@
     "dur",
     "duration",
     "length",
-    "seconds"
+    "seconds",
+    "latent"
   ],
   "output_roles": [
     "image",
     "img",
     "vid",
-    "video"
+    "video",
+    "latent"
   ],
   "agent_event_types": [
     "assistant/message",

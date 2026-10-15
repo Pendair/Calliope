@@ -1198,4 +1198,11 @@ export const fr: Dict = {
 	'settings.roleAssetsHint': 'Génère les images de référence des personnages, lieux et objets.',
 	'settings.roleVideo': 'Vidéo',
 	'settings.roleVideoHint': 'Réécrit les prompts utilisés pour la génération vidéo.',
+	// --- H3 motion-context chain ---
+	'chain.latentAuto': 'Rempli automatiquement depuis la chaîne de clips',
+	'chain.aria': 'Chaîne de contexte de mouvement',
+	'chain.starts': 'Démarre une chaîne',
+	'chain.continues': 'Prolonge {label}',
+	'chain.startHere': 'Démarrer une nouvelle chaîne ici',
+	'chain.stale': '{label} a été re-rendu après que ce clip l’a prolongé. Re-rendez ce clip pour qu’il corresponde.',
 };

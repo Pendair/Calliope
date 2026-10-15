@@ -4,11 +4,21 @@ from __future__ import annotations
 from typing import Literal
 
 ComfyInputKind = Literal[
-    "text", "textarea", "number", "boolean", "image", "image_url", "audio", "video"
+    "text", "textarea", "number", "boolean", "image", "image_url", "audio", "video", "latent"
 ]
-ComfyOutputKind = Literal["image", "video", "other"]
+ComfyOutputKind = Literal["image", "video", "latent", "other"]
 PatchField = Literal[
-    "image", "url", "audio", "video", "file", "text", "value", "int", "float", "prompt"
+    "image",
+    "url",
+    "audio",
+    "video",
+    "file",
+    "text",
+    "value",
+    "int",
+    "float",
+    "prompt",
+    "latent_path",
 ]
 
 TEXT_AREA_CLASSES = frozenset(
@@ -31,6 +41,11 @@ AUDIO_CLASSES = frozenset({"LoadAudio", "VHS_LoadAudio"})
 # Stock LoadVideo uses the `file` widget; VHS uses `video`.
 VIDEO_CLASSES = frozenset({"LoadVideo", "VHS_LoadVideo", "VHS_LoadVideoPath"})
 VIDEO_FILE_CLASSES = frozenset({"LoadVideo"})
+# ComfyUI-H3-Motion-Context's AV latent pair. Calliope fills both itself at run
+# time (queue/worker.py: chain resolution), so they are never media pickers.
+# Listed explicitly: "LoadLatent" would otherwise hit the "load" → image fallback.
+LATENT_INPUT_CLASSES = frozenset({"MiniMaxH3MotionContextLoadLatent"})
+LATENT_OUTPUT_CLASSES = frozenset({"MiniMaxH3MotionContextSaveLatent"})
 VIDEO_OUTPUT_CLASSES = frozenset(
     {"VHS_VideoCombine", "SaveVideo", "VideoOutput", "AnimateDiffCombine"}
 )
@@ -70,6 +85,8 @@ NEUTRAL_CLASSES = frozenset(
 
 
 def class_to_input_kind(class_type: str) -> ComfyInputKind:
+    if class_type in LATENT_INPUT_CLASSES:
+        return "latent"
     if class_type in IMAGE_CLASSES:
         return "image"
     if class_type in IMAGE_URL_CLASSES:
@@ -103,6 +120,8 @@ def class_to_input_kind(class_type: str) -> ComfyInputKind:
 
 
 def class_to_patch_field(class_type: str) -> PatchField:
+    if class_type in LATENT_INPUT_CLASSES:
+        return "latent_path"
     if class_type in IMAGE_CLASSES:
         return "image"
     if class_type in IMAGE_URL_CLASSES:
@@ -134,6 +153,8 @@ def class_to_patch_field(class_type: str) -> PatchField:
 
 
 def class_to_output_kind(class_type: str) -> ComfyOutputKind:
+    if class_type in LATENT_OUTPUT_CLASSES:
+        return "latent"
     if class_type in VIDEO_OUTPUT_CLASSES or "video" in class_type.lower():
         return "video"
     if class_type in IMAGE_OUTPUT_CLASSES or "image" in class_type.lower():

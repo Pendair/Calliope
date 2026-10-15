@@ -86,7 +86,7 @@ The app walks a project through four stages — **Story, Assets, Script, Video**
 - **Assets:** each character, location, and item has its own **Image prompt**. Pick a workflow and shared settings (width/height/etc.) at the top, then click Generate per entity to produce reference images on your ComfyUI. Regenerate any single entity without touching the others.
 - **Script:** **Regenerate Script** also opens a project-linked Agents chat (pre-filled) to rewrite the per-scene script. Scenes preserve the full screenplay: complete action prose and verbatim dialogue. Then **Break into shots** splits a scene into its shot clips — an LLM coverage pass allocates every dialogue line and action beat across clips of ~5–10 seconds (a 2-minute dialogue scene becomes a dozen clips, not one). Scenes link back to the characters and locations from the Story stage.
 - **Video:** each clip gets rendered by a **Generate** pass that queues a job on ComfyUI with the right prompt and reference images (plus optional video/audio file refs, if the workflow declares an `(Input:video)` node — see [Video inputs are workflow-owned](#video-inputs-are-workflow-owned-no-auto-chaining)).
-- **Film view:** once clips are rendered, **Export film** stitches them with ffmpeg: clips are normalized to 1080p at the **majority frame rate of the clips themselves** (24 fps clips export at 24 fps; mixed-rate projects conform to whichever rate most clips use), joined with 0.5s crossfades, and loudness-normalized into one final file.
+- **Film view:** once clips are rendered, **Export film** stitches them with ffmpeg: clips are normalized to 1080p at the **majority frame rate of the clips themselves** (24 fps clips export at 24 fps; mixed-rate projects conform to whichever rate most clips use), joined with 0.5s crossfades (a hard cut where a clip continues the one before it through H3 motion context — see [Continuing a clip](#continuing-a-clip-h3-motion-context)), and loudness-normalized into one final file.
 - When everything is done the project is automatically marked **Completed**.
 
 **Playground** is a free-form generation page outside the project pipeline: run any imported workflow with arbitrary inputs, upload your own files (image / video / audio) as inputs, and optionally attach a result to a project as an asset.
@@ -138,6 +138,7 @@ Input roles:
 | `audio` | `sound`, `sfx` | Audio file input (`LoadAudio`) |
 | `seed` | — | Shared form |
 | `duration` | `dur`, `length`, `seconds` | Scene duration (video jobs) |
+| `latent` | — | Previous clip's saved latent (H3 motion context; filled by Calliope) |
 
 Output roles:
 
@@ -145,6 +146,7 @@ Output roles:
 |---|---|
 | `image` | `img` |
 | `video` | `vid` |
+| `latent` | — |
 
 Unknown roles still show up in the dynamic form; they just get no special auto-fill. Plain `(Input)` / `(Output)` without a role still works through a deprecated label fallback, so old workflows keep working — but tag new workflows with explicit roles.
 
@@ -162,9 +164,21 @@ For multi-reference workflows, generic `(Input:image)` inputs are filled in **no
 
 ### Video inputs are workflow-owned (no auto-chaining)
 
-Whether a render consumes a reference video is decided **entirely by the ComfyUI workflow** — a node tagged `(Input:video)` (a `LoadVideo` node). Calliope adds no per-scene "chain" flag and no clip-source picker: if your workflow has a video input, it appears in the Video-stage form like any other media slot, and you supply the video yourself — upload a file, or pick a rendered clip from the project via the asset picker. Leave it empty and the job fails in ComfyUI with its own error; Calliope never silently invents an input for you.
+Whether a render consumes a reference video is decided **entirely by the ComfyUI workflow** — a node tagged `(Input:video)` (a `LoadVideo` node). Calliope adds no per-scene "chain" flag and no clip-source picker: if your workflow has a video input, it appears in the Video-stage form like any other media slot, and you supply the video yourself — upload a file, or pick a rendered clip from the project via the asset picker. Leave it empty and the job fails in ComfyUI with its own error; Calliope never silently invents an input for you. (The one input Calliope does fill on its own is an H3 motion-context **latent** slot, which is also declared by the workflow — see [Continuing a clip](#continuing-a-clip-h3-motion-context).)
 
 The workflow pattern (per [kat3ri/ComfyUI-MiniMax-H3-Extend](https://github.com/kat3ri/ComfyUI-MiniMax-H3-Extend)) is a `LoadVideo (Input:video)` node feeding the MiniMax H3 extend patched nodes (`MiniMaxH3EncodeAVPatched` → `MiniMaxH3VideoExtendPatched`) with the `(Output:video)` node at the end. Recommended starting settings from that repo: `context_frames` **2**, `ref_spacing` **1–2**, `ref_decay` **0.3**, `ref_ramp` **3–4** (5–6 if the prior clip had heavy motion).
+
+### Continuing a clip (H3 motion context)
+
+With [ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) installed (a version whose Load Latent has the `folder` widget), a clip can **continue the clip before it**: the previous clip's saved AV latent is pinned at the head of the new one, so motion and sound carry across the join instead of restarting. The example `example_ComfyUI_workflows/MiniMaxH3-Singularity-Continuity-5Ref1Latent-API.json` is wired for it.
+
+- **Tags.** Title the pack's Load Latent node `(Input:latent)` and its Save Latent node `(Output:latent)`. Calliope recognizes both classes even untagged; neither shows a picker in the form — Calliope fills them.
+- **What happens on Generate.** The Save node is pointed at a fixed slot (`calliope/p<project>_c<clip>`), and after the render Calliope downloads that latent over `/view` into `assets/<project>/latent/`. When the next clip renders, Calliope uploads the previous clip's latent over `/upload/image` and the Load node reads it from ComfyUI's input folder. Calliope still never reads or writes ComfyUI's folders directly, and a cleared ComfyUI output folder doesn't break a chain.
+- **Which clip it continues.** The one immediately before it in playback order (scene order, then clip order), across scene boundaries. The first clip always starts a chain; any other clip continues unless you tick **Start a new chain here** on it (shown only for workflows with a latent slot). **Generate all** works in order: a clip whose previous clip is still queued waits for it. A clip whose previous clip has no saved latent fails with a message naming both clips.
+- **Stale continuations.** Re-rendering a clip leaves the clips that continued it as they were and flags them as stale; re-render them to match. Picking an older render from a clip's render history brings that render's latent with it.
+- **Joins in the film.** Export uses a hard cut (no crossfade) on every join where the second clip continues the first, and the usual 0.5 s crossfade everywhere else.
+- **Resolution** must match between the two clips of a join; the pack refuses a mismatch and the job shows its error.
+- Turn Spectrum (`SpectrumApplyMiniMaxH3`) off in continuation workflows, as the Motion Context README advises for pinned frames. The `h3-continuation-prompt` agent skill has the prompt rules that keep a continuation from restarting.
 
 ### Review the prompt before you generate
 

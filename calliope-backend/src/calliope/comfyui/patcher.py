@@ -94,6 +94,14 @@ def patch_workflow(
         if not isinstance(node, dict):
             continue
         inputs = dict(node.get("inputs") or {})
+        if isinstance(value, dict):
+            # Several widgets on one node, named explicitly (the H3 motion-context
+            # latent pair: path + index + folder). Written as given — no field
+            # prediction, since the caller already knows the widget names.
+            inputs.update(value)
+            node["inputs"] = inputs
+            patched[key] = node
+            continue
         widget = bool_widget_key(inputs)
         if widget is not None:
             coerced = coerce_bool(value)

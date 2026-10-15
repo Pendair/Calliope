@@ -3,6 +3,10 @@
 Pipeline (validated on real clips — do not reinvent): normalize each clip →
 0.5s crossfades (xfade/acrossfade) → loudness normalize. ComfyUI is never
 involved; export jobs run locally against files on disk.
+
+A join where the second clip continues the first through H3 motion context
+(``continued_from_clip_id``) is a hard cut instead: the motion and sound already
+run across it, and a crossfade would double the overlap.
 """
 from __future__ import annotations
 
@@ -99,7 +103,7 @@ def collect_clips(project_id: int) -> tuple[list[dict[str, Any]], list[dict[str,
             SELECT c.*, s.heading, s.order_index AS scene_order_index
             FROM clips c JOIN scenes s ON s.id = c.scene_id
             WHERE c.project_id = ?
-            ORDER BY s.order_index, c.order_index, c.id
+            ORDER BY s.order_index, s.id, c.order_index, c.id
             """,
             (project_id,),
         ).fetchall()
@@ -109,6 +113,32 @@ def collect_clips(project_id: int) -> tuple[list[dict[str, Any]], list[dict[str,
     with_clip = [c for c in clips if c.get("clip_path")]
     skipped = [c for c in clips if not c.get("clip_path")]
     return with_clip, skipped
+
+
+def continued_from(clip: dict[str, Any]) -> int | None:
+    """The clip this one was rendered as a continuation of, if any."""
+    raw = clip.get("video_settings_json")
+    try:
+        data = json.loads(raw) if raw else {}
+    except (json.JSONDecodeError, TypeError):
+        return None
+    value = data.get("continued_from_clip_id") if isinstance(data, dict) else None
+    return int(value) if value is not None else None
+
+
+def join_cuts(clips: list[dict[str, Any]]) -> list[bool]:
+    """Per join (clip k-1 → k): True for a hard cut.
+
+    Only an exact continuation pair cuts: if the clip it continued was skipped
+    (no video) the join is between unrelated clips and crossfades as usual.
+    """
+    return [continued_from(clips[k]) == clips[k - 1].get("id") for k in range(1, len(clips))]
+
+
+def output_duration(durations: list[float], cuts: list[bool]) -> float:
+    """Length of the stitched film: every crossfade overlaps XFADE_SEC."""
+    fades = sum(1 for cut in cuts if not cut)
+    return sum(durations) - XFADE_SEC * fades
 
 
 def _project_title(project_id: int) -> str:
@@ -163,11 +193,14 @@ def build_ffmpeg_cmd(
     dest: str | Path,
     *,
     fps: float | None = None,
+    cuts: list[bool] | None = None,
 ) -> list[str]:
     """Assemble the validated normalize → xfade → loudnorm ffmpeg command.
 
     fps=None conforms every clip to target_fps(probes) — the clips' own
-    majority rate. Pass an explicit fps to override the vote.
+    majority rate. Pass an explicit fps to override the vote. ``cuts`` marks
+    joins (k-1 → k) joined by a hard cut (concat) instead of a crossfade;
+    None crossfades every join.
     """
     if not clips:
         raise RuntimeError("No clips to export")
@@ -215,14 +248,26 @@ def build_ffmpeg_cmd(
         filters.append("[v0]format=yuv420p[vout]")
         filters.append(f"[a0]{LOUDNORM}[aout]")
     else:
+        cuts = list(cuts) if cuts is not None else [False] * (n - 1)
+        if len(cuts) != n - 1:
+            raise ValueError("cuts must have one entry per join")
+        # Length of the stitched output so far; each crossfade starts XFADE_SEC
+        # before its end, a hard cut adds the next clip whole.
+        built = durations[0]
         for k in range(1, n):
-            offset = sum(durations[:k]) - k * XFADE_SEC
             vin = "[v0]" if k == 1 else f"[x{k - 1}]"
             ain = "[a0]" if k == 1 else f"[c{k - 1}]"
+            if cuts[k - 1]:
+                filters.append(f"{vin}[v{k}]concat=n=2:v=1:a=0[x{k}]")
+                filters.append(f"{ain}[a{k}]concat=n=2:v=0:a=1[c{k}]")
+                built += durations[k]
+                continue
+            offset = built - XFADE_SEC
             filters.append(
                 f"{vin}[v{k}]xfade=transition=fade:duration={XFADE_SEC}:offset={offset:.3f}[x{k}]"
             )
             filters.append(f"{ain}[a{k}]acrossfade=d={XFADE_SEC}:c1=tri:c2=tri[c{k}]")
+            built += durations[k] - XFADE_SEC
         # format=yuv420p AFTER the final xfade — the chain renegotiates to
         # yuv444p otherwise and players choke on the result.
         filters.append(f"[x{n - 1}]format=yuv420p[vout]")
@@ -288,9 +333,10 @@ async def run_export(
     probes = [await probe(clip["clip_path"]) for clip in clips]
     fps = target_fps(probes)
     durations = [float(p["duration"]) for p in probes]
-    total_us = (sum(durations) - XFADE_SEC * max(0, len(clips) - 1)) * 1_000_000
+    cuts = join_cuts(clips)
+    total_us = output_duration(durations, cuts) * 1_000_000
 
-    cmd = build_ffmpeg_cmd(clips, probes, dest, fps=fps)
+    cmd = build_ffmpeg_cmd(clips, probes, dest, fps=fps, cuts=cuts)
     logger.info("Export job %s: %s", job_id, " ".join(cmd))
 
     await bus.publish(

@@ -13,10 +13,12 @@ from calliope.comfyui.client import ComfyUIClient, select_output_files
 from calliope.comfyui.dry_run import write_placeholder_mp4, write_placeholder_png
 from calliope.comfyui.parser import parse_dynamic_inputs
 from calliope.comfyui.patcher import node_widget_field, patch_workflow
+from calliope.comfyui.registry import LATENT_INPUT_CLASSES
 from calliope.comfyui.roles import normalize_input_role
 from calliope.db import get_db
 from calliope.events.bus import event_bus
 from calliope.export.runner import run_export
+from calliope.queue import chain
 from calliope.queue.manager import queue_manager
 
 logger = logging.getLogger("calliope.worker")
@@ -117,6 +119,11 @@ def _apply_strict_mode(
         node = patched.get(nid)
         if not isinstance(node, dict):
             continue
+        # A latent slot is filled by chain resolution, never baked into the file.
+        # Checked by class, not schema: a workflow imported before the latent
+        # kind existed still carries kind "image" in its stored schema.
+        if node.get("class_type") in LATENT_INPUT_CLASSES:
+            continue
         field = node_widget_field(node)
         tpl = template.get(nid)
         template_value = (tpl.get("inputs") or {}).get(field) if isinstance(tpl, dict) else None
@@ -211,6 +218,20 @@ class QueueWorker:
                                 "message": f"Saved {self._job_label(job)}",
                             },
                         )
+                except chain.ChainDeferred as deferred:
+                    # The previous clip is still queued or rendering: put this job
+                    # behind it (Generate All relies on this) instead of failing.
+                    queue_manager.defer_after(job["id"], deferred.blocking_job_id)
+                    await event_bus.publish(
+                        "job.progress",
+                        {
+                            "job_id": job["id"],
+                            "kind": job["kind"],
+                            "project_id": job.get("project_id"),
+                            "message": str(deferred),
+                        },
+                    )
+                    await asyncio.sleep(config.settings.queue_poll_interval_sec)
                 except _CancelledByUser:
                     # The row already carries status='cancelled' (Stop button
                     # flipped it out-of-band). Do NOT mark_failed (that would
@@ -275,12 +296,22 @@ class QueueWorker:
             if not workflow:
                 raise RuntimeError("No workflow found for job")
 
+            # Chain state is read now, not at enqueue: the previous clip may have
+            # rendered (or been re-rolled) since this job was queued.
+            conn = get_db(config.settings.db_path)
+            try:
+                plan = chain.resolve(conn, job, workflow["nodes"])
+            finally:
+                conn.close()
+
             input_values = payload.get("input_values") or {}
             patched = patch_workflow(workflow["nodes"], input_values)
             if workflow["strict_mode"]:
                 patched = _apply_strict_mode(
                     patched, workflow["nodes"], workflow["schema"], input_values
                 )
+            if plan:
+                patched = await self._apply_chain(client, plan, patched)
             patched = await client.prepare_media_inputs(patched)
             prompt_id = await client.queue_prompt(patched)
 
@@ -295,9 +326,8 @@ class QueueWorker:
                 messages = status.get("messages") or []
                 raise RuntimeError(f"ComfyUI error: {messages}")
 
-            outputs_meta = select_output_files(
-                client.extract_outputs(history), workflow["nodes"], kind
-            )
+            files = client.extract_outputs(history)
+            outputs_meta = select_output_files(files, workflow["nodes"], kind)
             dest_dir = config.settings.assets_dir / str(project_id) / kind
             dest_dir.mkdir(parents=True, exist_ok=True)
             paths: list[str] = []
@@ -313,9 +343,82 @@ class QueueWorker:
                 paths.append(str(dest))
 
             self._apply_outputs_to_entities(job, payload, paths)
+            if job.get("clip_id") and kind == "video" and paths:
+                await self._collect_latent(client, job, plan, files)
             return paths
         finally:
             await client.close()
+
+    async def _apply_chain(
+        self, client: ComfyUIClient, plan: dict[str, Any], patched: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Patch the latent pair; upload the previous clip's latent if continuing."""
+        values = plan["values"]
+        if plan.get("upload"):
+            if not await client.latent_input_supported():
+                raise RuntimeError(
+                    "This ComfyUI's H3 Motion Context Load Latent cannot read from the "
+                    "input folder. Update ComfyUI-H3-Motion-Context to a version whose "
+                    "Load Latent has the `folder` widget, then retry."
+                )
+            name = await client.upload_latent(plan["upload"], plan["upload_name"])
+            values = {
+                nid: {**v, "latent_path": name} if "latent_path" in v else v
+                for nid, v in values.items()
+            }
+        return patch_workflow(patched, values)
+
+    async def _collect_latent(
+        self,
+        client: ComfyUIClient,
+        job: dict[str, Any],
+        plan: dict[str, Any] | None,
+        files: list[dict[str, str]],
+    ) -> None:
+        """Keep this render's saved latent (if any) and record the chain on the clip.
+
+        A render without one still records — the clip's previous latent belonged
+        to the video it just replaced, so continuing from it would be wrong.
+        """
+        clip_id = int(job["clip_id"])
+        conn = get_db(config.settings.db_path)
+        try:
+            has_chain = plan is not None or bool(
+                {"latent_path", "renders"} & set(chain.read_settings(conn, clip_id))
+            )
+        finally:
+            conn.close()
+        if not has_chain:
+            return
+        latent_path: str | None = None
+        latents = [f for f in files if f.get("key") == "latents"]
+        if latents:
+            meta = latents[0]
+            dest = chain.latent_dest(
+                config.settings.assets_dir, job["project_id"], clip_id, job["id"]
+            )
+            await client.download_image(
+                meta["filename"],
+                subfolder=meta.get("subfolder", ""),
+                folder_type=meta.get("type", "output"),
+                dest=dest,
+            )
+            latent_path = str(dest)
+        elif plan and plan["values"] and any(
+            "filename_prefix" in v for v in plan["values"].values()
+        ):
+            logger.warning(
+                "Job %s: Save Latent reported no file in ComfyUI history. "
+                "ComfyUI-H3-Motion-Context needs a version whose Save Latent "
+                "reports ui.latents; the next clip cannot continue this one.",
+                job["id"],
+            )
+        conn = get_db(config.settings.db_path)
+        try:
+            chain.record_render(conn, clip_id, int(job["id"]), latent_path, plan)
+            conn.commit()
+        finally:
+            conn.close()
 
     async def _dry_run(self, job: dict[str, Any], payload: dict[str, Any]) -> list[str]:
         project_id = job["project_id"]

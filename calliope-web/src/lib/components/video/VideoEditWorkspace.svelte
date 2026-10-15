@@ -8,6 +8,7 @@
 	import OmniComposer from '$lib/components/OmniComposer.svelte';
 	import type { AssetOption } from '$lib/assetPicker';
 	import { carryValuesAcrossWorkflows, sanitizeWorkflowValues } from '$lib/comfy/carryValues';
+	import { LATENT_IN, normalizeInputRole } from '$lib/comfy/parser';
 	import Icon from '$lib/components/ui/Icon.svelte';
 	import ClipMonitor from './ClipMonitor.svelte';
 	import JobInputsDrawer from './JobInputsDrawer.svelte';
@@ -61,6 +62,8 @@ import { t } from '$lib/i18n.svelte';
 	/** Render-history versioning: apply an older job's output to the clip. */
 	onApplyToClip?: (job: Job, path: string) => void;
 	applying?: boolean;
+	/** H3 motion-context chains: the clip's "Start a new chain here" toggle. */
+	onChainStartChange?: (clipId: number, value: boolean) => void;
 	}
 
 	let {
@@ -94,7 +97,36 @@ import { t } from '$lib/i18n.svelte';
 		onGenerate,
 		onApplyToClip,
 		applying = false,
+		onChainStartChange,
 	}: Props = $props();
+
+	// --- H3 motion-context chain (only for workflows with a Load Latent slot) ---
+	// Checked by class as well as schema: a workflow imported before the latent
+	// kind existed carries kind "image" in its stored schema.
+	const hasLatentInput = $derived(
+		Boolean(
+			workflow &&
+				(workflow.input_schema.some(
+					(i) => i.kind === 'latent' || normalizeInputRole(i.role) === 'latent',
+				) ||
+					Object.values(workflow.workflow_json ?? {}).some((n) => LATENT_IN.has(n?.class_type))),
+		),
+	);
+	/** The clip before the selected one in playback order (what it continues). */
+	const prevClip = $derived.by(() => {
+		if (!selectedClip) return null;
+		const i = filmClips.findIndex((c) => c.clip.id === selectedClip.clip.id);
+		return i > 0 ? filmClips[i - 1] : null;
+	});
+	const chainStart = $derived(!prevClip || selectedClip?.clip.video_settings?.chain_start === true);
+	/** Rendered as a continuation, but not of the previous clip's current render. */
+	const chainStale = $derived.by(() => {
+		const vs = selectedClip?.clip.video_settings;
+		if (!vs || chainStart || !prevClip || !selectedClip?.clip.clip_path) return false;
+		if (vs.continued_from_clip_id == null) return false;
+		const prevJob = prevClip.clip.video_settings?.latent_job_id ?? null;
+		return vs.continued_from_clip_id !== prevClip.clip.id || vs.continued_from_job_id !== prevJob;
+	});
 
 	let inputsOpen = $state(false);
 
@@ -183,6 +215,32 @@ import { t } from '$lib/i18n.svelte';
 					{formatClock}
 				/>
 			{/if}
+			{#if hasLatentInput && selectedClip}
+				<div class="chain-row" role="group" aria-label={t('chain.aria')}>
+					<p class="chain-note">
+						<Icon name="film" size={14} />
+						{chainStart
+							? t('chain.starts')
+							: t('chain.continues', { label: prevClip?.label ?? '' })}
+					</p>
+					<label class="chain-toggle">
+						<input
+							type="checkbox"
+							checked={chainStart}
+							disabled={!prevClip}
+							onchange={(e) =>
+								onChainStartChange?.(selectedClip.clip.id, e.currentTarget.checked)}
+						/>
+						<span>{t('chain.startHere')}</span>
+					</label>
+					{#if chainStale}
+						<p class="chain-stale" role="status">
+							<Icon name="info" size={14} />
+							{t('chain.stale', { label: prevClip?.label ?? '' })}
+						</p>
+					{/if}
+				</div>
+			{/if}
 			<OmniComposer
 				inputs={workflow.input_schema}
 				bind:values={formValues}
@@ -208,6 +266,31 @@ import { t } from '$lib/i18n.svelte';
 </div>
 
 <style>
+	.chain-row {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		padding: 8px 10px;
+		border: 1px solid var(--border, rgba(127, 127, 127, 0.25));
+		border-radius: 8px;
+		font-size: 12px;
+	}
+	.chain-note,
+	.chain-stale {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		margin: 0;
+	}
+	.chain-stale {
+		color: var(--warning, #b7791f);
+	}
+	.chain-toggle {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		cursor: pointer;
+	}
 	/* Two columns: the player + strip own the left, every generation input
 	   lives in the right inspector so it can't push the player out of view. */
 	.workspace {

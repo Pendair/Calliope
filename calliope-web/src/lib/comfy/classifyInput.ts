@@ -11,6 +11,7 @@
  *   media     → thumbnail tiles (upload / asset-pick)
  *   control   → compact pills (resolution, duration, seed)
  *   advanced  → hidden inside an "Advanced" popover
+ *   hidden    → filled by Calliope itself (H3 motion-context latent slot)
  */
 import type { ComfyDynamicInput } from './types';
 import { normalizeInputRole } from './parser';
@@ -40,6 +41,11 @@ export interface ClassifiedInput {
  */
 export function classifyInput(inp: ComfyDynamicInput): ClassifiedInput {
 	const role = normalizeInputRole(inp.role);
+
+	// --- Latent slot: the worker resolves the chain at run time; no picker ---
+	if (role === 'latent' || inp.kind === 'latent') {
+		return { input: inp, zone: 'hidden', widget: 'textPill' };
+	}
 
 	// --- Composer ---
 	if (role === 'prompt' || role === 'positive') {

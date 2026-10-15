@@ -7,6 +7,7 @@ from calliope.comfyui.patcher import bool_widget_key
 from calliope.comfyui.registry import (
     AUDIO_CLASSES,
     IMAGE_CLASSES,
+    LATENT_INPUT_CLASSES,
     VIDEO_CLASSES,
     ComfyOutputKind,
     class_to_input_kind,
@@ -24,6 +25,8 @@ def extract_default_value(node: dict[str, Any]) -> str | int | float | bool | No
     inputs = node.get("inputs") or {}
     if class_type in IMAGE_CLASSES or class_type in AUDIO_CLASSES or class_type in VIDEO_CLASSES:
         return None
+    if class_type in LATENT_INPUT_CLASSES:
+        return None  # chain resolution fills it; the file's own path is meaningless
     # bool is a subclass of int — check it first or True/False fall through
     # as numbers and the form stringifies them.
     widget = bool_widget_key(inputs)
@@ -77,7 +80,9 @@ def parse_dynamic_outputs(workflow: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         out_kind: ComfyOutputKind = class_to_output_kind(node.get("class_type", ""))
         canon = normalize_output_role(role)
-        if canon == "video":
+        if canon == "latent":
+            out_kind = "latent"
+        elif canon == "video":
             out_kind = "video"
         elif canon == "image":
             out_kind = "image"

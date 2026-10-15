@@ -103,6 +103,33 @@ class QueueManager:
         finally:
             conn.close()
 
+    def defer_after(self, job_id: int, blocking_job_id: int) -> None:
+        """Put a claimed job back in the queue, behind ``blocking_job_id``.
+
+        claim_next takes the oldest created_at, so the job is re-stamped one
+        second after the job it waits for. Waiting in place would deadlock: the
+        worker runs one job at a time, and the blocking job may still be pending.
+        """
+        conn = get_db(config.settings.db_path)
+        try:
+            conn.execute(
+                """
+                UPDATE jobs SET status = 'pending', started_at = NULL,
+                created_at = MAX(
+                    created_at,
+                    COALESCE(
+                        (SELECT datetime(created_at, '+1 second') FROM jobs WHERE id = ?),
+                        created_at
+                    )
+                )
+                WHERE id = ? AND status = 'running'
+                """,
+                (blocking_job_id, job_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def retry(self, job_id: int) -> dict[str, Any] | None:
         conn = get_db(config.settings.db_path)
         try:

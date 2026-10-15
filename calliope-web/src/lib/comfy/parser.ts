@@ -14,6 +14,11 @@ const IMAGE = new Set(['LoadImage', 'ImageLoader', 'ETN_LoadImageBase64']);
 const IMAGE_URL = new Set(['Load Image From Url (mtb)']);
 const AUDIO = new Set(['LoadAudio', 'VHS_LoadAudio']);
 const VIDEO = new Set(['LoadVideo', 'VHS_LoadVideo', 'VHS_LoadVideoPath']);
+// Mirrors LATENT_INPUT_CLASSES / LATENT_OUTPUT_CLASSES in the backend registry:
+// ComfyUI-H3-Motion-Context's latent pair, filled by Calliope at run time. Listed
+// so "LoadLatent" never reaches the "load" → image fallback.
+export const LATENT_IN = new Set(['MiniMaxH3MotionContextLoadLatent']);
+const LATENT_OUT = new Set(['MiniMaxH3MotionContextSaveLatent']);
 const VIDEO_OUT = new Set(['VHS_VideoCombine', 'SaveVideo', 'VideoOutput', 'AnimateDiffCombine']);
 const IMAGE_OUT = new Set([
 	'SaveImage',
@@ -56,11 +61,13 @@ const INPUT_ROLE_ALIASES: Record<string, string[]> = {
 	audio: ['audio', 'sound', 'sfx'],
 	seed: ['seed'],
 	duration: ['duration', 'dur', 'length', 'seconds'],
+	latent: ['latent'],
 };
 
 const OUTPUT_ROLE_ALIASES: Record<string, string[]> = {
 	image: ['image', 'img'],
 	video: ['video', 'vid'],
+	latent: ['latent'],
 };
 
 export function parseTitleTag(title: string): {
@@ -97,6 +104,7 @@ export function normalizeOutputRole(role: string | null | undefined): string | n
 }
 
 function classToInputKind(classType: string): ComfyDynamicInput['kind'] {
+	if (LATENT_IN.has(classType)) return 'latent';
 	if (IMAGE.has(classType)) return 'image';
 	if (IMAGE_URL.has(classType)) return 'image_url';
 	if (AUDIO.has(classType)) return 'audio';
@@ -128,6 +136,7 @@ function boolWidgetKey(inputs: Record<string, unknown>): string | null {
 function extractDefault(node: WorkflowNode): string | number | boolean | undefined {
 	const { inputs, class_type } = node;
 	if (IMAGE.has(class_type) || AUDIO.has(class_type) || VIDEO.has(class_type)) return undefined;
+	if (LATENT_IN.has(class_type)) return undefined;
 	// typeof true === 'boolean', not 'number' — check before the number branch
 	// or a boolean default is dropped and the form never sees false.
 	const widget = boolWidgetKey(inputs);
@@ -166,7 +175,8 @@ export function parseDynamicOutputs(workflow: Record<string, WorkflowNode>): Com
 		if (kind !== 'output') continue;
 		const canon = normalizeOutputRole(role);
 		let outKind: ComfyDynamicOutput['kind'] = 'other';
-		if (canon === 'video' || VIDEO_OUT.has(node.class_type) || node.class_type.toLowerCase().includes('video'))
+		if (canon === 'latent' || LATENT_OUT.has(node.class_type)) outKind = 'latent';
+		else if (canon === 'video' || VIDEO_OUT.has(node.class_type) || node.class_type.toLowerCase().includes('video'))
 			outKind = 'video';
 		else if (
 			canon === 'image' ||

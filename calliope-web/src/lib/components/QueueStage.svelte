@@ -367,6 +367,22 @@
 		}
 	}
 
+	// H3 motion-context chains: "Start a new chain here". Written straight to the
+	// clip; the form autosave never sends chain_start, and the backend keeps the
+	// stored value when a payload omits it.
+	async function setChainStart(clipId: number, value: boolean) {
+		const clip = allClips.find((c) => c.clip.id === clipId)?.clip;
+		if (!clip) return;
+		try {
+			await projects.updateClip(projectId, clipId, {
+				video_settings: { ...(clip.video_settings ?? {}), chain_start: value },
+			});
+			await client.invalidateQueries({ queryKey: ['scenes'] });
+		} catch (err) {
+			toast.error(err instanceof Error ? err.message : String(err));
+		}
+	}
+
 	// --- HITL review gate (issue #27) ---
 	let previewOpen = $state(false);
 
@@ -916,6 +932,7 @@
 			{formatClock}
 			onApplyToClip={(j, path) => applyJobToClip(j, path)}
 			applying={applyingJob}
+			onChainStartChange={setChainStart}
 			onSelectClip={selectClip}
 			onStep={step}
 		onWorkflowChange={(id) => {

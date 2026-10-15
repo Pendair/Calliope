@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { assetUrl, playgroundApi, type UploadKind } from '$lib/api';
 	import type { ComfyDynamicInput } from '$lib/comfy/types';
+	import { normalizeInputRole } from '$lib/comfy/parser';
 	import { toast } from '$lib/toast';
 	import Icon from './ui/Icon.svelte';
 	import Spinner from './ui/Spinner.svelte';
@@ -241,7 +242,10 @@
 						<span class="kind">{inp.kind}</span>
 					{/if}
 				</label>
-				{#if readonly}
+				{#if inp.kind === 'latent' || normalizeInputRole(inp.role) === 'latent'}
+					<!-- H3 motion-context slot: the worker fills it from the clip chain. -->
+					<div class="readonly">{t('chain.latentAuto')}</div>
+				{:else if readonly}
 					<div class="readonly">{values[inp.nodeId] ?? inp.defaultValue ?? '—'}</div>
 				{:else if inp.kind === 'textarea'}
 					<textarea

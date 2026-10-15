@@ -6,8 +6,9 @@ export type ComfyInputKind =
 	| 'image'
 	| 'image_url'
 	| 'audio'
-	| 'video';
-export type ComfyOutputKind = 'image' | 'video' | 'other';
+	| 'video'
+	| 'latent';
+export type ComfyOutputKind = 'image' | 'video' | 'latent' | 'other';
 
 export interface ComfyDynamicInput {
 	nodeId: string;
@@ -69,6 +70,13 @@ export interface SceneVideoSettings {
 	form_workflow_id?: number;
 	prompt_draft?: string;
 	prompt_draft_meta?: { based_on?: string; saved_at?: string };
+	/** H3 motion-context chains: user-owned "Start a new chain here". */
+	chain_start?: boolean;
+	/** Worker-owned chain facts for the clip's current render (read-only here). */
+	latent_path?: string | null;
+	latent_job_id?: number | null;
+	continued_from_clip_id?: number | null;
+	continued_from_job_id?: number | null;
 	[key: string]: unknown;
 }
 

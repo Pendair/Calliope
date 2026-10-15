@@ -277,9 +277,14 @@ class ComfyUIClient:
             logger.warning("ComfyUI interrupt failed: %s", exc)
 
     def extract_outputs(self, history: dict[str, Any]) -> list[dict[str, str]]:
+        """Every file in a run's history, tagged with its history ``key``.
+
+        ``latents`` (H3 motion-context Save Latent) are collected too; the key
+        keeps them out of select_output_files' media result.
+        """
         outputs: list[dict[str, str]] = []
         for node_id, node_out in (history.get("outputs") or {}).items():
-            for key in ("images", "gifs", "videos"):
+            for key in ("images", "gifs", "videos", "latents"):
                 for item in node_out.get(key) or []:
                     outputs.append(
                         {
@@ -287,9 +292,43 @@ class ComfyUIClient:
                             "subfolder": item.get("subfolder", ""),
                             "type": item.get("type", "output"),
                             "node_id": str(node_id),
+                            "key": key,
                         }
                     )
         return outputs
+
+    async def upload_latent(self, path: Path, name: str) -> str:
+        """Upload a saved AV latent into ComfyUI's flat input folder as ``name``.
+
+        Same ``/upload/image`` route as audio/video (it accepts any file);
+        overwrite so a re-rendered previous clip replaces its old upload.
+        """
+        data = path.read_bytes()
+        files = {"image": (name, data, "application/octet-stream")}
+        form = {"overwrite": "true", "type": "input"}
+        resp = await self._http.post(f"{self.base_url}/upload/image", files=files, data=form)
+        if resp.status_code >= 400:
+            raise _surface_error("ComfyUI latent upload failed", resp)
+        result = resp.json()
+        uploaded = result.get("name", name)
+        sub = result.get("subfolder") or ""
+        return f"{sub}/{uploaded}" if sub else uploaded
+
+    async def latent_input_supported(self) -> bool:
+        """True when the installed Load Latent can read from the input folder.
+
+        ComfyUI-H3-Motion-Context releases before the ``folder`` widget would
+        look for the uploaded file under output/ and fail with a path error.
+        """
+        resp = await self._http.get(
+            f"{self.base_url}/object_info/MiniMaxH3MotionContextLoadLatent"
+        )
+        if resp.status_code >= 400:
+            return False
+        info = (resp.json() or {}).get("MiniMaxH3MotionContextLoadLatent") or {}
+        folder = ((info.get("input") or {}).get("optional") or {}).get("folder")
+        choices = folder[0] if isinstance(folder, list) and folder else []
+        return isinstance(choices, list) and "input" in choices
 
 
 # Input loaders publish the source file into ComfyUI history (VHS_LoadVideo's
@@ -321,6 +360,8 @@ def select_output_files(
     """
     from calliope.comfyui.parser import parse_dynamic_outputs
 
+    # Saved latents are chain state, collected separately — never the clip.
+    files = [item for item in files if item.get("key") != "latents"]
     role = "video" if kind == "video" else "image" if kind == "image" else None
     if role:
         tagged = {
