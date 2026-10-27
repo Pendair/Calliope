@@ -29,6 +29,8 @@ interface Props {
 	draftNonce?: number;
 	/** Enabled ComfyUI workflows for the `@` typeahead. */
 	workflows?: WorkflowOption[];
+	/** Extra `@` row for the Comfy API provider. Null hides it. */
+	routerOption?: string | null;
 	/** Available skills for the `/` typeahead. */
 	skills?: SkillOption[];
 }
@@ -40,6 +42,7 @@ let {
 	draft = '',
 	draftNonce = 0,
 	workflows = [],
+	routerOption = null,
 	skills = [],
 }: Props = $props();
 
@@ -67,7 +70,16 @@ let {
 	let slashAnchor = $state({ top: 0, bottom: 0, left: 0 });
 
 	const uploads = createUploadManager();
-	const mentionItems = $derived(filterWorkflows(workflows, mentionQuery));
+	const mentionItems = $derived.by(() => {
+		const rows: Array<{ id?: number; name: string; kind: 'image' | 'video' }> = [
+			...filterWorkflows(workflows, mentionQuery),
+		];
+		const q = mentionQuery.trim().toLowerCase();
+		if (routerOption && (!q || routerOption.toLowerCase().includes(q))) {
+			rows.push({ name: routerOption, kind: 'video' });
+		}
+		return rows;
+	});
 	const slashItems = $derived(filterSkills(skills, slashQuery));
 	const busy = $derived(uploadingNames.length > 0);
 	const sendable = $derived(!busy && (!editorEmpty || attachments.length > 0));
@@ -272,7 +284,7 @@ let {
 		mentionLocked = chipCount() >= MAX_WORKFLOW_MENTIONS;
 	}
 
-	function insertMention(wf: WorkflowOption) {
+	function insertMention(wf: { id?: number; name: string; kind: 'image' | 'video' }) {
 		if (chipCount() >= MAX_WORKFLOW_MENTIONS) {
 			mentionOpen = false;
 			mentionLocked = false;
@@ -302,11 +314,12 @@ let {
 		editorEl.focus();
 	}
 
-	function makeChip(wf: WorkflowOption): HTMLSpanElement {
+	function makeChip(wf: { id?: number; name: string; kind: string }): HTMLSpanElement {
 		const chip = document.createElement('span');
 		chip.className = 'wf-chip';
 		chip.contentEditable = 'false';
-		chip.dataset.workflowId = String(wf.id);
+		// No id (Comfy Router row): serialize() keeps the prose, skips the mention.
+		if (wf.id != null) chip.dataset.workflowId = String(wf.id);
 		chip.dataset.workflowName = wf.name;
 		chip.dataset.workflowKind = wf.kind;
 		chip.textContent = `@${wf.name}`;

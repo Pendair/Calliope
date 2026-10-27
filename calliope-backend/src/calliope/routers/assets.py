@@ -62,6 +62,7 @@ async def generate_assets(project_id: int, payload: GenerateAssetsRequest) -> di
         input_values_override=payload.input_values,
         asset_target=payload.asset_target or "sheet",
         prompt_override=payload.prompt,
+        router_model=payload.router_model,
     )
     return {"ok": True, "jobs": jobs}
 

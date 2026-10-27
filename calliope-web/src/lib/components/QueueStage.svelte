@@ -8,6 +8,7 @@
 		jobsApi,
 		playgroundApi,
 		projects,
+		settings as settingsApi,
 		workflows,
 		type Clip,
 		type Job,
@@ -15,6 +16,7 @@
 		type Workflow,
 	} from '$lib/api';
 	import { compactInputValues } from '$lib/comfy/promptInput';
+	import { ROUTER_VIDEO_VALUE, routerModelOf } from '$lib/comfy/router';
 	import { normalizeInputRole } from '$lib/comfy/parser';
 	import { carryValuesAcrossWorkflows, sanitizeWorkflowValues } from '$lib/comfy/carryValues';
 	import type { AssetOption } from '$lib/assetPicker';
@@ -45,6 +47,38 @@
 	// different workflows (e.g. image→video then video→video extend). Keys are
 	// clip ids; hydrated from clip.workflow_id / saved video_settings.
 	let selectedWorkflow = $state<Record<number, number>>({});
+	let selectedRouter = $state<Record<number, string>>({});
+	type RouterClipForm = { images: string[]; prompt: string; duration: number };
+	let routerForms = $state<Record<number, RouterClipForm>>({});
+
+	function seedRouterForm(clip: Clip, scene: Scene): RouterClipForm {
+		const images: string[] = [];
+		for (const character of scene.characters ?? []) {
+			const path = character.sheet_path || character.portrait_path;
+			if (path && !images.includes(path)) images.push(path);
+			if (images.length >= 9) break;
+		}
+		if (images.length < 9 && scene.env_image_path && !images.includes(scene.env_image_path)) {
+			images.push(scene.env_image_path);
+		}
+		const raw = clip.duration_sec ?? scene.duration_sec ?? 5;
+		return {
+			images,
+			prompt: clip.video_settings?.prompt_draft ?? '',
+			duration: Math.max(4, Math.min(15, Math.round(raw))),
+		};
+	}
+
+	function routerImagePayload(paths: string[]) {
+		return paths.filter(Boolean).slice(0, 9).map((path) => {
+			const named = assetOptions.find((option) => option.path === path);
+			const name =
+				named?.label.split(' · ')[0] ||
+				path.split(/[/\\]/).pop()?.replace(/\.[^.]+$/, '') ||
+				'reference';
+			return { path, name };
+		});
+	}
 	let lastFormScene = $state<number | null>(null);
 
 	// Per-scene input cache — switching scenes no longer wipes the form.
@@ -65,6 +99,10 @@
 	const workflowsQuery = createQuery({
 		queryKey: ['workflows'],
 		queryFn: workflows.list,
+	});
+	const settingsQuery = createQuery({
+		queryKey: ['settings'],
+		queryFn: settingsApi.get,
 	});
 	const jobsQuery = createQuery(
 		toStore(() => ({
@@ -329,16 +367,26 @@
 	}
 
 	const generateOne = createMutation({
-	mutationFn: (vars: { clipId: number; sceneId: number; prompt?: string }) => {
+	mutationFn: (vars: {
+		clipId: number;
+		sceneId: number;
+		prompt?: string;
+		routerImages?: string[];
+		durationSec?: number;
+	}) => {
 		const { clipId, sceneId, prompt } = vars;
 		const scene = scenes.find((s) => s.id === sceneId);
 		const clip = scene?.clips?.find((c) => c.id === clipId);
 		const wf = clip && scene ? workflowForClip(clip, scene) : undefined;
+		const model = selectedRouter[clipId];
 		return jobsApi.generateVideos(projectId, {
 			clip_ids: [clipId],
-			workflow_id: selectedWorkflow[clipId] ?? clip?.workflow_id ?? wf?.id,
-			input_values: compactInputValues(formValues),
+			workflow_id: model ? undefined : (selectedWorkflow[clipId] ?? clip?.workflow_id ?? wf?.id),
+			input_values: model ? undefined : compactInputValues(formValues),
 			prompts: prompt ? { [String(clipId)]: prompt } : undefined,
+			router_model: model,
+			router_images: model ? routerImagePayload(vars.routerImages ?? []) : undefined,
+			duration_sec: model ? vars.durationSec : undefined,
 		});
 	},
 		onSuccess: async () => {
@@ -474,11 +522,22 @@
 							? clip.video_settings.prompt_draft_meta.based_on
 							: null;
 					const wf = clip ? workflowForClip(clip, scene) : undefined;
+					const model = clip ? selectedRouter[clip.id] : undefined;
+					const form = clip && model ? (routerForms[clip.id] ?? seedRouterForm(clip, scene)) : undefined;
 					await jobsApi.generateVideos(projectId, {
 						clip_ids: clip ? [target.id] : undefined,
 						scene_ids: clip ? undefined : [target.id],
-						workflow_id: clip ? (selectedWorkflow[clip.id] ?? clip.workflow_id ?? wf?.id) : wf?.id,
-						prompts: draft ? { [target.key]: draft } : undefined,
+						workflow_id: model ? undefined : (clip ? (selectedWorkflow[clip.id] ?? clip.workflow_id ?? wf?.id) : wf?.id),
+						prompts: model
+							? form?.prompt
+								? { [target.key]: form.prompt }
+								: undefined
+							: draft
+								? { [target.key]: draft }
+								: undefined,
+						router_model: model,
+						router_images: form ? routerImagePayload(form.images) : undefined,
+						duration_sec: form?.duration,
 					});
 					queued++;
 					if (draft) drafted++;
@@ -935,8 +994,36 @@
 			onChainStartChange={setChainStart}
 			onSelectClip={selectClip}
 			onStep={step}
+		extraOptions={$settingsQuery.data?.comfy_api_key && $settingsQuery.data?.comfy_router_enabled
+			? [{ value: ROUTER_VIDEO_VALUE, label: t('router.minimaxH3') }]
+			: []}
+		selectedValue={selClip && selectedRouter[selClip.id] ? `router:${selectedRouter[selClip.id]}` : null}
+		selectedLabel={selClip && selectedRouter[selClip.id] ? t('router.minimaxH3') : null}
+		routerImages={selClip ? (routerForms[selClip.id]?.images ?? []) : []}
+		routerPrompt={selClip ? (routerForms[selClip.id]?.prompt ?? '') : ''}
+		routerDuration={selClip ? (routerForms[selClip.id]?.duration ?? 5) : 5}
+		onRouterForm={(form) => {
+			if (!selClip) return;
+			routerForms = { ...routerForms, [selClip.id]: form };
+		}}
 		onWorkflowChange={(id) => {
 			if (!selClip) return;
+			const model = routerModelOf(id);
+			if (model) {
+				selectedRouter = { ...selectedRouter, [selClip.id]: model };
+				if (!routerForms[selClip.id] && selected) {
+					routerForms = {
+						...routerForms,
+						[selClip.id]: seedRouterForm(selClip, selected),
+					};
+				}
+				return;
+			}
+			if (selectedRouter[selClip.id]) {
+				const next = { ...selectedRouter };
+				delete next[selClip.id];
+				selectedRouter = next;
+			}
 			const from = workflowForClip(selClip, selected);
 			selectedWorkflow = { ...selectedWorkflow, [selClip.id]: Number(id) };
 			const to = workflowForClip(selClip, selected);
@@ -949,9 +1036,21 @@
 			};
 		}}
 		onGenerate={() => {
-			if (selClip) $generateOne.mutate({ clipId: selClip.id, sceneId: selected.id });
+			if (!selClip) return;
+			if (selectedRouter[selClip.id]) {
+				const form = routerForms[selClip.id];
+				$generateOne.mutate({
+					clipId: selClip.id,
+					sceneId: selected.id,
+					prompt: form?.prompt,
+					routerImages: form?.images,
+					durationSec: form?.duration,
+				});
+				return;
+			}
+			$generateOne.mutate({ clipId: selClip.id, sceneId: selected.id });
 		}}
-		onPreviewPrompt={beginGenerate}
+		onPreviewPrompt={selClip && selectedRouter[selClip.id] ? undefined : beginGenerate}
 	/>
 
 	<PromptPreviewModal

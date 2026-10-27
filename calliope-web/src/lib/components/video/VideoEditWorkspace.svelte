@@ -56,7 +56,14 @@ import { t } from '$lib/i18n.svelte';
 		formatClock: (sec: number) => string;
 		onSelectClip: (clipId: number) => void;
 		onStep: (dir: -1 | 1) => void;
-	onWorkflowChange: (id: number) => void;
+	onWorkflowChange: (id: number | string) => void;
+	extraOptions?: { value: string; label: string }[];
+	selectedValue?: string | number | null;
+	selectedLabel?: string | null;
+	routerImages?: string[];
+	routerPrompt?: string;
+	routerDuration?: number;
+	onRouterForm?: (form: { images: string[]; prompt: string; duration: number }) => void;
 	onFormChange?: (values: Record<string, string | number>) => void;
 	onGenerate: () => void;
 	/** Render-history versioning: apply an older job's output to the clip. */
@@ -93,6 +100,13 @@ import { t } from '$lib/i18n.svelte';
 		onSelectClip,
 		onStep,
 		onWorkflowChange,
+		extraOptions = [],
+		selectedValue = null,
+		selectedLabel = null,
+		routerImages = [],
+		routerPrompt = '',
+		routerDuration = 5,
+		onRouterForm,
 		onFormChange,
 		onGenerate,
 		onApplyToClip,
@@ -170,7 +184,7 @@ import { t } from '$lib/i18n.svelte';
 	</div>
 
 	<aside class="dock-col" aria-label={t('videoEdit.dockAria')}>
-		{#if workflow}
+		{#if workflow || extraOptions.length > 0}
 			{#if assetOptions.length === 0}
 				<p class="asset-hint">{t('videoEdit.assetHint')}</p>
 			{/if}
@@ -242,11 +256,18 @@ import { t } from '$lib/i18n.svelte';
 				</div>
 			{/if}
 			<OmniComposer
-				inputs={workflow.input_schema}
+				inputs={workflow?.input_schema ?? []}
 				bind:values={formValues}
 				{workflow}
 				{workflows}
 				onWorkflowChange={onWorkflowChange}
+				{extraOptions}
+				{selectedValue}
+				{selectedLabel}
+				{routerImages}
+				{routerPrompt}
+				{routerDuration}
+				{onRouterForm}
 {assetOptions}
 				{allowUpload}
 				generateLabel={generateLabel || t('videoEdit.generateLabel')}

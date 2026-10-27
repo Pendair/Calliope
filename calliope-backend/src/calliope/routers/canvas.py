@@ -27,6 +27,9 @@ ENTITY_COLUMNS = {
     "character": 80,
     "location": 400,
     "item": 720,
+    # Between items (720) and scenes (1280): the cast sits on the left,
+    # each clip card on the right of that gap, scenes keep their column.
+    "clip": 1000,
     "scene": 1280,
 }
 # Entity cards are ~190px tall (header + 132px media). 120px rows made them
@@ -42,6 +45,22 @@ ARTIFACT_ROW_HEIGHT = 240
 # Legacy single-column constant kept for back-compat reads; new placements
 # use the grid above.
 ARTIFACT_COLUMN_X = ARTIFACT_GRID_X
+
+# Same mention token as video_agent._clip_label: "#3.2 · Heading".
+# A blank heading falls back to "Scene N" so the card is still mentionable.
+_CLIP_LABEL_SQL = """
+SELECT c.id,
+       printf(
+           '#%d.%d · %s',
+           s.order_index,
+           c.order_index,
+           COALESCE(NULLIF(TRIM(s.heading), ''), 'Scene ' || s.order_index)
+       ) AS label
+FROM clips c
+JOIN scenes s ON s.id = c.scene_id
+WHERE c.project_id = ?
+ORDER BY s.order_index, c.order_index, c.id
+"""
 
 _ENTITY_QUERIES = [
     (
@@ -60,6 +79,7 @@ _ENTITY_QUERIES = [
         "scene",
         "SELECT id, heading AS label FROM scenes WHERE project_id = ? ORDER BY order_index, id",
     ),
+    ("clip", _CLIP_LABEL_SQL),
 ]
 
 
@@ -218,9 +238,50 @@ def _load_graph(conn, canvas_id: int) -> dict[str, Any]:
     return {"canvas": _canvas_out(conn, row), "nodes": nodes, "edges": edges}
 
 
+def _refresh_clip_nodes(conn, canvas_id: int, project_id: int) -> int:
+    """Keep clip-card titles on the #N.M mention and hide cards whose clip is gone.
+
+    Does not move x/y. A tombstoned card (deleted = 1) stays hidden so a clip
+    card the user removed does not come back while the clip still exists.
+    Returns the number of rows changed.
+    """
+    live = {
+        int(r["id"]): r["label"]
+        for r in conn.execute(_CLIP_LABEL_SQL, (project_id,)).fetchall()
+    }
+    rows = conn.execute(
+        """
+        SELECT id, entity_id, title FROM canvas_node
+        WHERE canvas_id = ? AND entity_type = 'clip' AND deleted = 0
+        """,
+        (canvas_id,),
+    ).fetchall()
+    changed = 0
+    now = _now()
+    for row in rows:
+        clip_id = row["entity_id"]
+        if clip_id not in live:
+            conn.execute(
+                "UPDATE canvas_node SET deleted = 1, updated_at = ? WHERE id = ?",
+                (now, row["id"]),
+            )
+            changed += 1
+            continue
+        label = live[clip_id]
+        if row["title"] != label:
+            conn.execute(
+                "UPDATE canvas_node SET title = ?, updated_at = ? WHERE id = ?",
+                (label, now, row["id"]),
+            )
+            changed += 1
+    return changed
+
+
 def seed_entities(conn, canvas_id: int, project_id: int) -> int:
-    """Insert entity nodes for characters/locations/items/scenes not yet on
-    the canvas. Idempotent on (entity_type, entity_id). Returns insert count."""
+    """Insert entity nodes for characters/locations/items/scenes/clips not yet
+    on the canvas. Idempotent on (entity_type, entity_id). Also refreshes clip
+    titles and hides clip cards whose clip row is gone. Returns the number of
+    inserts plus clip-card updates."""
     existing = {
         (r["entity_type"], r["entity_id"])
         for r in conn.execute(
@@ -283,7 +344,7 @@ def seed_entities(conn, canvas_id: int, project_id: int) -> int:
             existing.add(key)
             inserted += 1
             y += ENTITY_ROW_HEIGHT
-    return inserted
+    return inserted + _refresh_clip_nodes(conn, canvas_id, project_id)
 
 
 def next_artifact_slot(conn, canvas_id: int) -> tuple[float, float]:
@@ -400,10 +461,12 @@ async def get_canvas(canvas_id: int) -> dict[str, Any]:
     conn = get_db(settings.db_path)
     try:
         # Auto-seed: entity cards for content created AFTER the canvas was
-        # opened (agent drafted characters/locations/scenes mid-session) must
-        # appear on refetch, not only on ensure/re-open. Idempotent and
-        # tombstone-respecting — deleted cards never resurrect. Only project
-        # canvases seed (sandbox boards have no entities to seed).
+        # opened (agent drafted characters/locations/scenes/clips mid-session)
+        # must appear on refetch, not only on ensure/re-open. The same pass
+        # refreshes clip mention titles and hides cards whose clip was
+        # deleted. Idempotent and tombstone-respecting — deleted cards never
+        # resurrect. Only project canvases seed (sandbox boards have no
+        # entities to seed).
         row = conn.execute("SELECT * FROM canvas WHERE id = ?", (canvas_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Canvas not found")

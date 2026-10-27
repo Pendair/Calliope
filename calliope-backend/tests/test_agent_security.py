@@ -178,6 +178,20 @@ def test_guard_does_not_block_targeted_delete(client):
         conn.close()
 
 
+def test_first_script_is_allowed_when_the_story_exists(client):
+    """Creating scenes is not a story rewrite. Beats and characters stay."""
+    from calliope.agent.harness import _destructive_guard
+
+    registry, _ = build_harness()
+    pid = _mk_project(client, "First Script")
+    client.post(f"/api/projects/{pid}/characters", json={"name": "歐陽鋒"})
+    tool = registry.get("generate_script")
+    ctx = ToolContext(session_id=_mk_session(pid), project_id=pid)
+    for replace in (True, False):
+        decision = _destructive_guard(ctx, tool, {"replace": replace})
+        assert decision.kind == "allow", replace
+
+
 def test_guard_still_blocks_bulk_replace(client):
     """generate_script replace=true on a non-empty project is still blocked."""
     registry, _ = build_harness()

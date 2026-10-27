@@ -52,7 +52,14 @@ Open `http://127.0.0.1:5173`. The dev server proxies `/api` to the backend on `1
 Open the app, go to **Settings**, and set:
 
 1. **LLM** — one or more OpenAI-compatible endpoints (base URL, model name, API key). Save several, then pick which one is **Active**.
-2. **ComfyUI** — the base URL of your running ComfyUI (e.g. `http://127.0.0.1:8188`)
+2. **ComfyUI** — the base URL of your running ComfyUI (e.g. `http://127.0.0.1:8188`). Workflow jobs go through the Comfy SDK to `comfy-api-proxy` (default `http://127.0.0.1:8189`, **Settings → Comfy → Comfy API URL**). With ComfyUI already on 8188:
+
+```bash
+pip install comfy-api-proxy
+comfy-api-proxy --comfyui http://127.0.0.1:8188 --port 8189
+```
+
+Comfy Router is optional. Save a Comfy API key under **Settings → Comfy**, turn on **Use Comfy API provider (Router)**, and the video and asset pickers offer MiniMax H3 and FLUX 3. No key, or the switch left off, means every job stays on your local workflow.
 3. **Agent** *(optional)* — assign a specific LLM per agent role (see below)
 
 Leave **Dry-run** off — it is meant for testing and produces placeholder results instead of real generations.

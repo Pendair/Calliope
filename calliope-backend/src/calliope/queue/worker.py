@@ -4,9 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any
-
-from pathlib import Path as _fs_path
 
 from calliope import config
 from calliope.comfyui.client import ComfyUIClient, select_output_files
@@ -15,6 +14,19 @@ from calliope.comfyui.parser import parse_dynamic_inputs
 from calliope.comfyui.patcher import node_widget_field, patch_workflow
 from calliope.comfyui.registry import LATENT_INPUT_CLASSES
 from calliope.comfyui.roles import normalize_input_role
+from calliope.comfyui.router_models import (
+    build_router_body,
+    download_url,
+    require_api_key,
+    result_filename,
+    result_urls,
+)
+from calliope.comfyui.sdk_runtime import (
+    bind_local_media,
+    open_async_client,
+    output_records,
+    proxy_reachable,
+)
 from calliope.db import get_db
 from calliope.events.bus import event_bus
 from calliope.export.runner import run_export
@@ -159,6 +171,25 @@ class QueueWorker:
         if self._task:
             await asyncio.wait([self._task], timeout=5)
 
+    def _completed_event(self, job: dict[str, Any], outputs: list[str]) -> dict[str, Any]:
+        """Payload for job.completed. clip_id is set for a project clip render
+        so the canvas can keep that file on the clip card instead of posting
+        a second, unconnected artifact."""
+        try:
+            job_payload = json.loads(job.get("payload_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            job_payload = {}
+        return {
+            "job_id": job["id"],
+            "kind": job["kind"],
+            "outputs": outputs,
+            "project_id": job.get("project_id"),
+            "prompt": str(job_payload.get("prompt") or "")[:120],
+            "source": job_payload.get("source"),
+            "clip_id": job.get("clip_id"),
+            "message": f"{self._job_label(job)} · {len(outputs)} file(s)",
+        }
+
     async def _loop(self) -> None:
         logger.info("Queue worker started")
         while not self._stop.is_set():
@@ -184,28 +215,11 @@ class QueueWorker:
                     queue_manager.mark_done(job["id"], outputs)
                     if job["kind"] == "export":
                         self._mark_project_completed(job["project_id"])
-                    # Prompt snippet for canvas artifact labels: users
-                    # compare multiple generations of the same scene
-                    # side by side and pick one to re-apply. Parse the
-                    # stored payload here — _run_job's parsed copy is not
-                    # in this scope.
-                    try:
-                        job_payload = json.loads(job["payload_json"] or "{}")
-                    except (json.JSONDecodeError, TypeError):
-                        job_payload = {}
+                    # Prompt snippet for canvas artifact labels. clip_id tells
+                    # the board this file already belongs to a clip card.
                     await event_bus.publish(
                         "job.completed",
-                        {
-                            "job_id": job["id"],
-                            "kind": job["kind"],
-                            "outputs": outputs,
-                            "project_id": job["project_id"],
-                            "prompt": str(job_payload.get("prompt") or "")[:120],
-                            # Source stamp lets the UI attribute sandbox jobs
-                            # to their enqueuer without racing the jobs poll.
-                            "source": job_payload.get("source"),
-                            "message": f"{self._job_label(job)} · {len(outputs)} file(s)",
-                        },
+                        self._completed_event(job, outputs),
                     )
                     if outputs:
                         await event_bus.publish(
@@ -279,75 +293,162 @@ class QueueWorker:
             # and dry-run writes an mp4 placeholder (not the default PNG).
             return await run_export(job, payload, event_bus, dry_run=use_dry)
 
-        client = ComfyUIClient(config.settings.comfyui_base_url)
+        if use_dry:
+            return await self._dry_run(job, payload)
+
+        router_model = (payload.get("router_model") or "").strip()
+        if router_model:
+            return await self._run_router_job(job, payload, router_model)
+
+        await proxy_reachable()
+
+        workflow_id = job.get("workflow_id") or payload.get("workflow_id")
+        workflow = self._load_workflow(workflow_id)
+        if not workflow:
+            raise RuntimeError("No workflow found for job")
+
+        # Chain state is read now, not at enqueue: the previous clip may have
+        # rendered (or been re-rolled) since this job was queued.
+        conn = get_db(config.settings.db_path)
         try:
-            if use_dry:
-                return await self._dry_run(job, payload)
+            plan = chain.resolve(conn, job, workflow["nodes"])
+        finally:
+            conn.close()
 
-            healthy = await client.health()
-            if not healthy:
-                raise RuntimeError(
-                    f"ComfyUI unreachable at {config.settings.comfyui_base_url}. "
-                    "Start ComfyUI, or enable Dry-run in Settings only for placeholder testing."
-                )
+        input_values = payload.get("input_values") or {}
+        patched = patch_workflow(workflow["nodes"], input_values)
+        if workflow["strict_mode"]:
+            patched = _apply_strict_mode(
+                patched, workflow["nodes"], workflow["schema"], input_values
+            )
+        # Latent bytes still go through classic ComfyUI on 8188. The proxy
+        # leaves a bare filename in the graph alone and only rewrites SDK assets.
+        classic: ComfyUIClient | None = None
+        try:
+            if plan and plan.get("upload"):
+                classic = ComfyUIClient(config.settings.comfyui_base_url)
+                if not await classic.health():
+                    raise RuntimeError(
+                        f"ComfyUI unreachable at {config.settings.comfyui_base_url}. "
+                        "Start ComfyUI, or enable Dry-run in Settings only for placeholder testing."
+                    )
+                patched = await self._apply_chain(classic, plan, patched)
+            elif plan:
+                patched = patch_workflow(patched, plan["values"])
 
-            workflow_id = job.get("workflow_id") or payload.get("workflow_id")
-            workflow = self._load_workflow(workflow_id)
-            if not workflow:
-                raise RuntimeError("No workflow found for job")
-
-            # Chain state is read now, not at enqueue: the previous clip may have
-            # rendered (or been re-rolled) since this job was queued.
-            conn = get_db(config.settings.db_path)
-            try:
-                plan = chain.resolve(conn, job, workflow["nodes"])
-            finally:
-                conn.close()
-
-            input_values = payload.get("input_values") or {}
-            patched = patch_workflow(workflow["nodes"], input_values)
-            if workflow["strict_mode"]:
-                patched = _apply_strict_mode(
-                    patched, workflow["nodes"], workflow["schema"], input_values
-                )
-            if plan:
-                patched = await self._apply_chain(client, plan, patched)
-            patched = await client.prepare_media_inputs(patched)
-            prompt_id = await client.queue_prompt(patched)
-
-            history = await self._poll_history(client, prompt_id, job["id"])
-            if not history:
-                if queue_manager.is_cancelled(job["id"]):
-                    raise _CancelledByUser()
-                raise RuntimeError("Timed out waiting for ComfyUI history")
-
-            status = history.get("status") or {}
-            if status.get("status_str") == "error" or status.get("completed") is False:
-                messages = status.get("messages") or []
-                raise RuntimeError(f"ComfyUI error: {messages}")
-
-            files = client.extract_outputs(history)
-            outputs_meta = select_output_files(files, workflow["nodes"], kind)
-            dest_dir = config.settings.assets_dir / str(project_id) / kind
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            paths: list[str] = []
-            for meta in outputs_meta:
-                filename = meta["filename"]
-                dest = dest_dir / filename
-                await client.download_image(
-                    filename,
-                    subfolder=meta.get("subfolder", ""),
-                    folder_type=meta.get("type", "output"),
-                    dest=dest,
-                )
-                paths.append(str(dest))
+            async with open_async_client() as sdk:
+                wf = bind_local_media(sdk, patched)
+                sdk_job = await sdk.submit(wf)
+                await self._wait_sdk_job(sdk_job, job["id"])
+                if sdk_job.status != "succeeded":
+                    raise RuntimeError(
+                        f"ComfyUI job {sdk_job.id} ended {sdk_job.status}: {sdk_job.error}"
+                    )
+                files = output_records(sdk_job.outputs)
+                outputs_meta = select_output_files(files, workflow["nodes"], kind)
+                dest_dir = config.settings.assets_dir / str(project_id) / kind
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                paths: list[str] = []
+                for meta in outputs_meta:
+                    handle = meta.get("_output")
+                    if handle is None:
+                        continue
+                    dest = dest_dir / (meta.get("filename") or "output")
+                    await handle.to_file(dest)
+                    paths.append(str(dest))
+                if not paths:
+                    raise RuntimeError(f"ComfyUI job {sdk_job.id} finished with no output files")
 
             self._apply_outputs_to_entities(job, payload, paths)
             if job.get("clip_id") and kind == "video" and paths:
-                await self._collect_latent(client, job, plan, files)
+                await self._collect_latent(classic, job, plan, files)
             return paths
         finally:
-            await client.close()
+            if classic is not None:
+                await classic.close()
+
+    async def _run_router_job(
+        self, job: dict[str, Any], payload: dict[str, Any], model: str
+    ) -> list[str]:
+        """Partner-model generation through Comfy Router. Downloads the file immediately."""
+        from comfy_sdk import BinaryResult
+
+        require_api_key()
+        body = build_router_body(model, payload)
+        kind = job["kind"]
+        project_id = job["project_id"]
+        async with open_async_client() as sdk:
+            handle = await sdk.models.submit(model, body)
+            result = await self._wait_router(handle, job["id"])
+        dest_dir = config.settings.assets_dir / str(project_id) / kind
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        if isinstance(result, BinaryResult):
+            ext = ".mp3" if "audio" in (result.content_type or "") else ".bin"
+            dest = dest_dir / f"router-{job['id']}{ext}"
+            dest.write_bytes(result.content)
+            paths = [str(dest)]
+        else:
+            urls = result_urls(result)
+            if not urls:
+                raise RuntimeError(f"Comfy Router {model} returned no downloadable file")
+            paths = []
+            for url in urls:
+                dest = dest_dir / result_filename(url, kind)
+                await download_url(url, dest)
+                paths.append(str(dest))
+        self._apply_outputs_to_entities(job, payload, paths)
+        return paths
+
+    async def _wait_sdk_job(self, sdk_job: Any, job_id: int) -> None:
+        """Poll a workflow job until it finishes, the user cancels, or the timeout hits."""
+        interval = max(config.settings.queue_poll_interval_sec, 0.5)
+        timeout = config.settings.queue_poll_timeout_sec
+        deadline = None if timeout <= 0 else time.monotonic() + timeout
+        while True:
+            if self._stop.is_set() or queue_manager.is_cancelled(job_id):
+                await sdk_job.cancel()
+                raise _CancelledByUser()
+            await sdk_job.refresh()
+            if sdk_job.status in {"succeeded", "canceled", "failed", "expired"}:
+                return
+            if deadline is not None and time.monotonic() >= deadline:
+                await sdk_job.cancel()
+                raise RuntimeError(
+                    f"Timed out waiting for ComfyUI job {sdk_job.id} after {timeout:.0f}s"
+                )
+            await asyncio.sleep(interval)
+            await event_bus.publish(
+                "job.progress",
+                {
+                    "job_id": job_id,
+                    "prompt_id": sdk_job.id,
+                    "message": f"Waiting on ComfyUI ({sdk_job.id[:8]}…)",
+                },
+            )
+
+    async def _wait_router(self, handle: Any, job_id: int) -> Any:
+        interval = max(config.settings.queue_poll_interval_sec, 0.5)
+        timeout = config.settings.queue_poll_timeout_sec
+        deadline = None if timeout <= 0 else time.monotonic() + timeout
+        while True:
+            if self._stop.is_set() or queue_manager.is_cancelled(job_id):
+                await handle.cancel()
+                raise _CancelledByUser()
+            update = await handle.status()
+            status = str(getattr(update, "status", "") or "")
+            if status == "COMPLETED":
+                return await handle.get()
+            if deadline is not None and time.monotonic() >= deadline:
+                await handle.cancel()
+                raise RuntimeError(f"Timed out waiting for Comfy Router after {timeout:.0f}s")
+            await asyncio.sleep(interval)
+            await event_bus.publish(
+                "job.progress",
+                {
+                    "job_id": job_id,
+                    "message": f"Waiting on Comfy Router ({status or 'queued'})",
+                },
+            )
 
     async def _apply_chain(
         self, client: ComfyUIClient, plan: dict[str, Any], patched: dict[str, Any]
@@ -370,7 +471,7 @@ class QueueWorker:
 
     async def _collect_latent(
         self,
-        client: ComfyUIClient,
+        client: ComfyUIClient | None,
         job: dict[str, Any],
         plan: dict[str, Any] | None,
         files: list[dict[str, str]],
@@ -397,13 +498,25 @@ class QueueWorker:
             dest = chain.latent_dest(
                 config.settings.assets_dir, job["project_id"], clip_id, job["id"]
             )
-            await client.download_image(
-                meta["filename"],
-                subfolder=meta.get("subfolder", ""),
-                folder_type=meta.get("type", "output"),
-                dest=dest,
-            )
-            latent_path = str(dest)
+            handle = meta.get("_output")
+            if handle is not None:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                await handle.to_file(dest)
+            elif client is not None:
+                await client.download_image(
+                    meta["filename"],
+                    subfolder=meta.get("subfolder", ""),
+                    folder_type=meta.get("type", "output"),
+                    dest=dest,
+                )
+            else:
+                logger.warning(
+                    "Job %s: latent output had no SDK handle and no classic client",
+                    job["id"],
+                )
+                dest = None
+            if dest is not None:
+                latent_path = str(dest)
         elif plan and plan["values"] and any(
             "filename_prefix" in v for v in plan["values"].values()
         ):
@@ -434,39 +547,6 @@ class QueueWorker:
         self._apply_outputs_to_entities(job, payload, paths)
         await asyncio.sleep(0.3)
         return paths
-
-    async def _poll_history(
-        self, client: ComfyUIClient, prompt_id: str, job_id: int | None = None
-    ) -> dict[str, Any] | None:
-        interval = max(config.settings.queue_poll_interval_sec, 0.5)
-        timeout = config.settings.queue_poll_timeout_sec
-        # 0 (or negative) = keep polling until the job completes or is cancelled.
-        # Long video workflows routinely exceed 10 minutes, so the cap is now
-        # configurable (default 30 min) instead of a hardcoded 600 seconds.
-        attempts = None if timeout <= 0 else int(timeout / interval)
-        n = 0
-        while attempts is None or n < attempts:
-            n += 1
-            if self._stop.is_set():
-                return None
-            # Stop button: the job row was flipped to 'cancelled' out-of-band.
-            # Interrupt the running ComfyUI prompt so the GPU stops NOW, then
-            # bail — the row already carries the terminal state.
-            if queue_manager.is_cancelled(job_id):
-                await client.interrupt()
-                return None
-            history = await client.get_history(prompt_id)
-            if history:
-                return history
-            await asyncio.sleep(interval)
-            await event_bus.publish(
-                "job.progress",
-                {
-                    "prompt_id": prompt_id,
-                    "message": f"Waiting on ComfyUI ({prompt_id[:8]}…)",
-                },
-            )
-        return None
 
     def _mark_project_completed(self, project_id: int) -> None:
         """A finished export closes the project lifecycle."""

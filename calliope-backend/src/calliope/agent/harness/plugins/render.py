@@ -138,7 +138,13 @@ def register(registry: ToolRegistry) -> None:
                 "first. prompt lands on (Input:prompt). "
                 "width/height fill (Input:width)/(Input:height) by role. "
                 "attachments are ordered local paths for (Input:image) / "
-                "(Input:character) slots. Aspect ratio in the user's prose "
+                "(Input:character) slots. "
+                "Comfy Router · MiniMax H3 is a separate call: set "
+                "router_model to minimax/minimax-h3 ONLY when the user's own "
+                "words asked for Comfy Router MiniMax H3. Then pass prompt, "
+                "duration_sec, and router_images (local file paths, in order). "
+                "Do not invent that model for a normal workflow. "
+                "Aspect ratio in the user's prose "
                 "(e.g. 16:9) → 1920×1080 (1080p) or 1280×720 (720p); "
                 "9:16 swaps those; 1:1 → 1080×1080. "
                 "IMAGE for a linked project: when the user wants the result "
@@ -186,6 +192,25 @@ def register(registry: ToolRegistry) -> None:
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Ordered local asset paths for image/character slots",
+                    },
+                    "router_model": {
+                        "type": "string",
+                        "description": (
+                            "Set to minimax/minimax-h3 only when the user asked for "
+                            "Comfy Router · MiniMax H3. Omit for a local workflow."
+                        ),
+                    },
+                    "router_images": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Local reference-image paths for Router MiniMax H3, "
+                            "in Image 1..N order. Not Comfy node ids."
+                        ),
+                    },
+                    "duration_sec": {
+                        "type": "number",
+                        "description": "Router MiniMax H3 duration in seconds (4–15).",
                     },
                     "character_id": {
                         "type": "integer",
@@ -698,8 +723,135 @@ def _resolve_attach_target(
         conn.close()
 
 
+def _router_h3_requested(ctx: ToolContext, args: dict[str, Any]) -> str | None:
+    """The Router model id when this call is a user-asked MiniMax H3 job."""
+    from calliope.agent.harness import log as session_log
+    from calliope.comfyui.router_models import ROUTER_VIDEO_MODEL, user_asked_h3_router
+
+    raw = str(args.get("router_model") or "").strip()
+    if not raw:
+        return None
+    asked = user_asked_h3_router(session_log.latest_user_message(ctx.session_id))
+    if raw != ROUTER_VIDEO_MODEL or not asked:
+        return ""
+    return ROUTER_VIDEO_MODEL
+
+
+async def _run_router_h3(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    """Queue MiniMax H3 reference-to-video. Paths stay local; the worker inlines them."""
+    from calliope.comfyui.router_models import ROUTER_VIDEO_MODEL
+    from calliope.events.bus import event_bus
+    from calliope.queue.manager import queue_manager
+
+    prompt = str(args.get("prompt") or "").strip()
+    if not prompt:
+        return {"ok": False, "error": "Comfy Router MiniMax H3 needs a prompt."}
+    images = args.get("router_images")
+    if not images:
+        images = args.get("attachments")
+    duration = args.get("duration_sec")
+
+    if ctx.project_id is not None:
+        raw_scene = args.get("scene_id")
+        try:
+            scene_id = int(raw_scene)
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "error": "Linked-film Router video requires scene_id from list_scenes.",
+            }
+        conn = _db()
+        try:
+            scene = conn.execute(
+                "SELECT id FROM scenes WHERE id = ? AND project_id = ?",
+                (scene_id, int(ctx.project_id)),
+            ).fetchone()
+            if not scene:
+                return {"ok": False, "error": f"Scene {scene_id} not found in this project"}
+            first_clip = conn.execute(
+                "SELECT id FROM clips WHERE scene_id = ? ORDER BY order_index, id LIMIT 1",
+                (scene_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        from calliope.agent.video_agent import enqueue_video_jobs as _enqueue
+
+        clip_id = int(first_clip["id"]) if first_clip else None
+        try:
+            jobs = await _enqueue(
+                int(ctx.project_id),
+                clip_ids=[clip_id] if clip_id else None,
+                scene_ids=[scene_id] if clip_id is None else None,
+                router_model=ROUTER_VIDEO_MODEL,
+                router_images=images if isinstance(images, list) else None,
+                router_duration_sec=duration,
+                prompts={clip_id: prompt} if clip_id else None,
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        return {
+            "jobs": [_sc_job_dict_lite(j) for j in jobs],
+            "count": len(jobs),
+            "router_model": ROUTER_VIDEO_MODEL,
+            "sandbox": False,
+            "scene_id": scene_id,
+        }
+
+    queue_pid = _queue_project_id(ctx)
+    job = queue_manager.enqueue(
+        project_id=queue_pid,
+        kind="video",
+        payload={
+            "prompt": prompt,
+            "router_model": ROUTER_VIDEO_MODEL,
+            "router_images": images if isinstance(images, list) else [],
+            "duration_sec": duration if duration is not None else 5,
+            "source": "agent",
+            "session_id": ctx.session_id,
+        },
+    )
+    await event_bus.publish(
+        "job.created",
+        {
+            "job_id": job["id"],
+            "kind": "video",
+            "source": "agent",
+            "project_id": queue_pid,
+        },
+    )
+    return {
+        "jobs": [_sc_job_dict_lite(job)],
+        "count": 1,
+        "router_model": ROUTER_VIDEO_MODEL,
+        "sandbox": True,
+    }
+
+
 async def t_run_workflow(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     """Enqueue one Calliope workflow (linked project, or Playground scratch)."""
+    raw_router = str(args.get("router_model") or "").strip()
+    if raw_router:
+        from calliope.config import settings as app_settings
+
+        if not app_settings.comfy_router_enabled:
+            return {
+                "ok": False,
+                "error": (
+                    "Comfy Router is turned off in Settings → ComfyUI. "
+                    "Turn on 'Use Comfy API provider', or generate with a local workflow."
+                ),
+            }
+    router_choice = _router_h3_requested(ctx, args)
+    if router_choice == "":
+        return {
+            "ok": False,
+            "error": (
+                "Comfy Router · MiniMax H3 is only used when the user asked for it. "
+                "Leave router_model unset and run the local workflow."
+            ),
+        }
+    if router_choice:
+        return await _run_router_h3(ctx, args)
     # Batch form: character_ids=[104, 105] fans out into one run per id, so
     # "generate sheets for Kael AND Lila" is a single tool call instead of a
     # two-call plan the model historically fumbled into a stall loop.

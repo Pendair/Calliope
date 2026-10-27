@@ -70,10 +70,14 @@ def register(registry: ToolRegistry) -> None:
         ToolDefinition(
             name="generate_script",
             description=(
-                "Generate the scene script for the linked project via the script "
-                "agent, then break every scene into shot clips (with_clips, "
-                "default true). DESTRUCTIVE: replace=true (default) DELETES all "
-                "existing scenes first. If the user only wants tweaks, use "
+                "Generate the scene script for the linked project from its beats, "
+                "then break every scene into shot clips (with_clips, default "
+                "true). This does not rewrite the story. When the project has "
+                "zero scenes, call it directly — existing beats and characters "
+                "do not block it. An uploaded script is not a file in the "
+                "session folder; do not search for it with list_files or "
+                "read_file. DESTRUCTIVE only when scenes already exist: "
+                "replace=true DELETES those scenes first. For tweaks, use "
                 "update_scene / add_scene instead."
             ),
             parameters={

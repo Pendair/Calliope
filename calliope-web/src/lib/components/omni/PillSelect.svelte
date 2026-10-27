@@ -121,6 +121,7 @@
 		type="button"
 		class="pill"
 		class:highlight
+		title={label}
 		onclick={toggle}
 		aria-haspopup="listbox"
 		aria-expanded={open}

@@ -13,6 +13,7 @@
 	 * from the resolution pill writes `values[widthNodeId] = 1920` and
 	 * `values[heightNodeId] = 1080`. Backend API is untouched.
 	 */
+	import { ROUTER_VIDEO_VALUE } from '$lib/comfy/router';
 	import type { ComfyDynamicInput } from '$lib/comfy/types';
 	import { classifyAll, RESOLUTION_PRESETS, resolutionLabel } from '$lib/comfy/classifyInput';
 	import { createUploadManager } from '$lib/comfy/useUpload.svelte';
@@ -38,7 +39,17 @@
 		workflow?: WorkflowOption | null;
 		/** Available workflows (for model pill dropdown). */
 		workflows?: WorkflowOption[];
-		onWorkflowChange?: (id: number) => void;
+		onWorkflowChange?: (id: number | string) => void;
+		/** Extra pill rows, such as a Comfy Router model. Values are opaque strings. */
+		extraOptions?: { value: string; label: string }[];
+		/** When set, the pill shows this instead of the current workflow. */
+		selectedValue?: string | number | null;
+		selectedLabel?: string | null;
+		/** Fixed MiniMax H3 reference-to-video form. Replaces the workflow inputs. */
+		routerImages?: string[];
+		routerPrompt?: string;
+		routerDuration?: number;
+		onRouterForm?: (form: { images: string[]; prompt: string; duration: number }) => void;
 		assetOptions?: AssetOption[];
 		allowUpload?: boolean;
 		showErrors?: boolean;
@@ -62,6 +73,13 @@
 		workflow = null,
 		workflows = [],
 		onWorkflowChange,
+		extraOptions = [],
+		selectedValue = null,
+		selectedLabel = null,
+		routerImages = [],
+		routerPrompt = '',
+		routerDuration = 5,
+		onRouterForm,
 		assetOptions = [],
 		allowUpload = false,
 		showErrors = false,
@@ -75,6 +93,56 @@
 	}: Props = $props();
 
 	const uploadMgr = createUploadManager();
+	const routerActive = $derived(selectedValue === ROUTER_VIDEO_VALUE);
+	const generateDisabled = $derived(disabled || (routerActive && !routerPrompt.trim()));
+	const routerSlots = $derived(routerImages.length > 0 ? routerImages : ['']);
+
+	function emitRouter(images: string[], prompt = routerPrompt, duration = routerDuration) {
+		onRouterForm?.({
+			images: images.filter((path, index) => path || images.length === 1 && index === 0).slice(0, 9),
+			prompt,
+			duration: Math.max(4, Math.min(15, Math.round(Number(duration) || 5))),
+		});
+	}
+
+	function routerTile(index: number): ComfyDynamicInput {
+		return {
+			nodeId: `router-${index}`,
+			label: t('router.imageN', { n: index + 1 }),
+			role: 'image',
+			kind: 'image',
+			required: false,
+		};
+	}
+
+	async function onRouterFile(index: number, file: File) {
+		const path = await uploadMgr.uploadSafe(`router-${index}`, file);
+		if (!path) return;
+		const next = [...routerSlots];
+		next[index] = path;
+		emitRouter(next.filter(Boolean));
+	}
+
+	function onRouterAsset(index: number, path: string) {
+		const next = [...routerSlots];
+		next[index] = path;
+		emitRouter(next.filter(Boolean));
+	}
+
+	function onRouterClear(index: number) {
+		const next = routerSlots.filter((_, i) => i !== index).filter(Boolean);
+		emitRouter(next);
+	}
+
+	function addRouterImage() {
+		const filled = routerSlots.filter(Boolean);
+		if (filled.length >= 9) return;
+		onRouterForm?.({
+			images: [...filled, ''],
+			prompt: routerPrompt,
+			duration: routerDuration,
+		});
+	}
 
 	// Classify inputs into UI zones
 	const classified = $derived(classifyAll(inputs));
@@ -151,11 +219,16 @@
 
 	// ── Workflow / model pill ─────────────────────────────────────────────
 
-	const wfOptions = $derived(
-		(workflows ?? []).map((w) => ({ value: w.id, label: w.name })),
-	);
+	const wfOptions = $derived([
+		...(workflows ?? []).map((w) => ({ value: w.id, label: w.name })),
+		...(extraOptions ?? []),
+	]);
 
 	function onWfChange(val: string | number) {
+		if (typeof val === 'string' && val.startsWith('router:')) {
+			onWorkflowChange?.(val);
+			return;
+		}
 		onWorkflowChange?.(Number(val));
 	}
 
@@ -207,8 +280,38 @@
 
 <div class="omni-shell">
 	<!-- ── Composer body ─────────────────────────────────────────────── -->
-	<div class="omni-composer" class:has-media={classified.media.length > 0}>
-		{#if classified.media.length > 0}
+	<div class="omni-composer" class:has-media={routerActive || classified.media.length > 0}>
+		{#if routerActive}
+			<p class="router-hint">{t('router.h3Hint')}</p>
+			<div class="media-tray">
+				{#each routerSlots as path, index (`router-${index}-${path}`)}
+					<MediaTile
+						input={routerTile(index)}
+						value={path}
+						uploadingName={uploadMgr.uploading[`router-${index}`] ?? null}
+						{assetOptions}
+						{allowUpload}
+						onselectFile={(file) => onRouterFile(index, file)}
+						onselectAsset={(picked) => onRouterAsset(index, picked)}
+						onclear={() => onRouterClear(index)}
+					/>
+				{/each}
+				{#if routerSlots[routerSlots.length - 1] && routerSlots.filter(Boolean).length < 9}
+					<button type="button" class="router-add" onclick={addRouterImage}>
+						{t('router.h3AddImage')}
+					</button>
+				{/if}
+			</div>
+			<textarea
+				class="prompt-area"
+				placeholder={t('omni.promptPlaceholder')}
+				rows="12"
+				value={routerPrompt}
+				oninput={(e) => emitRouter(routerImages, e.currentTarget.value, routerDuration)}
+				onkeydown={onPromptKeydown}
+				aria-label={t('router.h3Prompt')}
+			></textarea>
+		{:else if classified.media.length > 0}
 			<div class="media-tray">
 				{#each classified.media as mc (mc.input.nodeId)}
 					{@const nodeId = mc.input.nodeId}
@@ -227,7 +330,7 @@
 			</div>
 		{/if}
 
-		{#if promptNode}
+		{#if !routerActive && promptNode}
 			<textarea
 				class="prompt-area"
 				placeholder={t('omni.promptPlaceholder')}
@@ -237,7 +340,7 @@
 				onkeydown={onPromptKeydown}
 				aria-label={t('omni.promptAria')}
 			></textarea>
-		{:else}
+		{:else if !routerActive}
 			<textarea
 				class="prompt-area no-prompt-role"
 				placeholder={t('omni.noPromptRole')}
@@ -246,7 +349,7 @@
 			></textarea>
 		{/if}
 
-		{#if negativeNode}
+		{#if !routerActive && negativeNode}
 			<div class="negative-section">
 				{#if showNegative}
 					<textarea
@@ -270,19 +373,31 @@
 	<!-- ── Control bar ───────────────────────────────────────────────── -->
 	<div class="omni-controls">
 		<!-- Model / workflow selector -->
-		{#if workflow && workflows.length > 0}
+		{#if (workflow && workflows.length > 0) || extraOptions.length > 0}
 			<PillSelect
-				label={workflow.name}
+				label={selectedLabel || workflow?.name || extraOptions[0]?.label || ''}
 				options={wfOptions}
-				value={workflow.id}
+				value={selectedValue ?? workflow?.id ?? null}
 				onchange={onWfChange}
 				icon="sparkle"
 				highlight
 			/>
 		{/if}
 
+		{#if routerActive}
+			<PillStepper
+				label={t('omni.duration')}
+				value={routerDuration}
+				min={4}
+				max={15}
+				step={1}
+				unit="s"
+				onchange={(v) => emitRouter(routerImages, routerPrompt, v)}
+			/>
+		{/if}
+
 		<!-- Resolution pill (merged width + height) -->
-		{#if resPair}
+		{#if !routerActive && resPair}
 			<PillSelect
 				label={currentResLabel ?? t('omni.resolution')}
 				options={resOptions}
@@ -293,7 +408,7 @@
 		{/if}
 
 		<!-- Standalone width/height (only if not a pair) -->
-		{#each classified.control.filter((c) => c.widget === 'resolutionPill') as ctrl (ctrl.input.nodeId)}
+		{#each !routerActive ? classified.control.filter((c) => c.widget === 'resolutionPill') : [] as ctrl (ctrl.input.nodeId)}
 			{@const nodeId = ctrl.input.nodeId}
 			<PillStepper
 				label={ctrl.input.label}
@@ -306,7 +421,7 @@
 		{/each}
 
 		<!-- Duration -->
-		{#each classified.control.filter((c) => normalizeInputRole(c.input.role) === 'duration') as ctrl (ctrl.input.nodeId)}
+		{#each !routerActive ? classified.control.filter((c) => normalizeInputRole(c.input.role) === 'duration') : [] as ctrl (ctrl.input.nodeId)}
 			{@const nodeId = ctrl.input.nodeId}
 			<PillStepper
 				label={t('omni.duration')}
@@ -320,7 +435,7 @@
 		{/each}
 
 		<!-- Seed -->
-		{#each classified.control.filter((c) => normalizeInputRole(c.input.role) === 'seed') as ctrl (ctrl.input.nodeId)}
+		{#each !routerActive ? classified.control.filter((c) => normalizeInputRole(c.input.role) === 'seed') : [] as ctrl (ctrl.input.nodeId)}
 			{@const nodeId = ctrl.input.nodeId}
 			<PillStepper
 				label={t('omni.seed')}
@@ -334,7 +449,7 @@
 
 		<!-- Advanced workflow options — rendered inline in the options row,
 		     at the same level as the workflow selector, not hidden in a popover -->
-		{#each classified.advanced as ctrl (ctrl.input.nodeId)}
+		{#each !routerActive ? classified.advanced : [] as ctrl (ctrl.input.nodeId)}
 			{@const nodeId = ctrl.input.nodeId}
 			<label class="adv-inline" title={ctrl.input.label}>
 				<span class="adv-inline-label">{ctrl.input.label}</span>
@@ -368,9 +483,13 @@
 		<button
 			type="button"
 			class="generate-btn"
-			class:disabled={submitting || disabled}
-			disabled={submitting || disabled}
-			title={disabled ? generateDisabledHint : undefined}
+			class:disabled={submitting || generateDisabled}
+			disabled={submitting || generateDisabled}
+			title={generateDisabled
+				? routerActive && !routerPrompt.trim()
+					? t('router.h3NeedPrompt')
+					: generateDisabledHint
+				: undefined}
 			onclick={() => onSubmit?.()}
 			aria-label={t('omni.generateAria')}
 		>
@@ -613,5 +732,29 @@
 	.adv-inline-input[type='number'] {
 		-moz-appearance: textfield;
 		appearance: textfield;
+	}
+
+	.router-hint {
+		margin: 0 0 10px;
+		color: var(--text-muted);
+		font-size: 12px;
+		line-height: 1.4;
+	}
+
+	.router-add {
+		align-self: center;
+		height: 36px;
+		padding: 0 12px;
+		border-radius: var(--pill-radius, 9999px);
+		border: 1px dashed var(--border);
+		background: transparent;
+		color: var(--text-secondary);
+		font-size: 12px;
+		cursor: pointer;
+	}
+
+	.router-add:hover {
+		border-color: var(--accent);
+		color: var(--text-primary);
 	}
 </style>

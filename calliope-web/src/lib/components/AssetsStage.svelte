@@ -7,6 +7,7 @@
 		jobsApi,
 		playgroundApi,
 		projects,
+		settings as settingsApi,
 		workflows,
 		type Character,
 		type Item,
@@ -29,6 +30,7 @@
 		withoutPromptInputs,
 		workflowHasPromptInput,
 	} from '$lib/comfy/promptInput';
+	import { ROUTER_IMAGE_VALUE, routerModelOf } from '$lib/comfy/router';
 	import {
 		characterSheetTemplate,
 		itemReferenceTemplate,
@@ -46,9 +48,9 @@
 	let tab = $state<'characters' | 'locations' | 'items'>('characters');
 	let drafts = $state<Record<string, string>>({});
 	let savingKey = $state<string | null>(null);
-	let sheetWorkflowId = $state<number | ''>('');
-	let envWorkflowId = $state<number | ''>('');
-	let itemWorkflowId = $state<number | ''>('');
+	let sheetWorkflowId = $state<number | string>('');
+	let envWorkflowId = $state<number | string>('');
+	let itemWorkflowId = $state<number | string>('');
 	let sheetInputValues = $state<Record<string, string | number>>({});
 	let envInputValues = $state<Record<string, string | number>>({});
 	let itemInputValues = $state<Record<string, string | number>>({});
@@ -58,7 +60,7 @@
 	let sheetAttempted = $state(false);
 	let envAttempted = $state(false);
 	let itemAttempted = $state(false);
-	let lastSheetWf = $state<number | '' | null>(null);
+	let lastSheetWf = $state<number | string | null>(null);
 	let previewSrc = $state<string | null>(null);
 	let previewAlt = $state('');
 
@@ -67,8 +69,8 @@
 		previewSrc = src;
 		previewAlt = alt;
 	}
-	let lastEnvWf = $state<number | '' | null>(null);
-	let lastItemWf = $state<number | '' | null>(null);
+	let lastEnvWf = $state<number | string | null>(null);
+	let lastItemWf = $state<number | string | null>(null);
 	let bulkPending = $state(false);
 
 	type DeleteTarget = { kind: 'character' | 'location' | 'item'; id: number; name: string };
@@ -89,6 +91,15 @@
 		queryKey: ['workflows'],
 		queryFn: workflows.list,
 	});
+	const settingsQuery = createQuery({
+		queryKey: ['settings'],
+		queryFn: settingsApi.get,
+	});
+		const fluxOption = $derived(
+		$settingsQuery.data?.comfy_api_key && $settingsQuery.data?.comfy_router_enabled
+			? { value: ROUTER_IMAGE_VALUE, label: t('router.flux3') }
+			: null,
+	);
 
 	// Shared cache key with QueueStage — refreshed via SSE invalidation from
 	// the project page (job.* events), not polling.
@@ -147,7 +158,7 @@
 	const sheetHasPrompt = $derived(workflowHasPromptInput(sheetWorkflow?.input_schema));
 	const envHasPrompt = $derived(workflowHasPromptInput(envWorkflow?.input_schema));
 	const itemHasPrompt = $derived(workflowHasPromptInput(itemWorkflow?.input_schema));
-	const showCharPrompt = $derived(sheetHasPrompt);
+	const showCharPrompt = $derived(sheetHasPrompt || !!routerModelOf(sheetWorkflowId));
 
 	const jobs = $derived($jobsQuery.data ?? []);
 
@@ -225,6 +236,7 @@
 			input_values?: Record<string, unknown>;
 			asset_target?: 'sheet';
 			prompt?: string;
+			router_model?: string;
 		}) => projects.generateAssets(projectId, payload),
 		onSuccess: async () => {
 			await client.invalidateQueries({ queryKey: ['assets'] });
@@ -318,12 +330,22 @@
 		drafts = { ...drafts, [key]: value };
 	}
 
-	function requireWorkflow(id: number | '', needKey: string): number | null {
-		if (id === '') {
+	function requireWorkflow(id: number | string, needKey: string): number | null {
+		if (id === '' || routerModelOf(id)) {
+			if (id === '') toast.error(t(needKey));
+			return null;
+		}
+		const n = Number(id);
+		if (!Number.isFinite(n)) {
 			toast.error(t(needKey));
 			return null;
 		}
-		return Number(id);
+		return n;
+	}
+
+	function pickWorkflow(value: string): number | string {
+		if (!value) return '';
+		return routerModelOf(value) ? value : Number(value);
 	}
 
 	function requireComplete(missing: string[], markAttempted: () => void): boolean {
@@ -401,11 +423,16 @@
 	}
 
 	async function generateCharacter(c: Character) {
-		const wfId = requireWorkflow(sheetWorkflowId, 'assets.wf.needSheet');
-		if (wfId == null) return;
-		if (!requireComplete(sheetMissing, () => (sheetAttempted = true))) return;
-		const prompt = sheetHasPrompt ? promptForChar(c) : '';
-		if (sheetHasPrompt) {
+		const model = routerModelOf(sheetWorkflowId);
+		let wfId: number | undefined;
+		if (!model) {
+			const required = requireWorkflow(sheetWorkflowId, 'assets.wf.needSheet');
+			if (required == null) return;
+			if (!requireComplete(sheetMissing, () => (sheetAttempted = true))) return;
+			wfId = required;
+		}
+		const prompt = model || sheetHasPrompt ? promptForChar(c) : '';
+		if (prompt) {
 			await projects.updateCharacter(projectId, c.id, { consistency_prompt: prompt });
 			const { [charKey(c.id)]: _, ...rest } = drafts;
 			drafts = rest;
@@ -416,17 +443,23 @@
 			location_ids: [],
 			asset_target: 'sheet',
 			workflow_id: wfId,
+			router_model: model ?? undefined,
 			input_values: compactInputValues(sheetInputValues),
 			prompt: prompt || undefined,
 		});
 	}
 
 	async function generateLocation(loc: Location) {
-		const wfId = requireWorkflow(envWorkflowId, 'assets.wf.needEnv');
-		if (wfId == null) return;
-		if (!requireComplete(envMissing, () => (envAttempted = true))) return;
-		const prompt = envHasPrompt ? promptForLoc(loc) : '';
-		if (envHasPrompt) {
+		const model = routerModelOf(envWorkflowId);
+		let wfId: number | undefined;
+		if (!model) {
+			const required = requireWorkflow(envWorkflowId, 'assets.wf.needEnv');
+			if (required == null) return;
+			if (!requireComplete(envMissing, () => (envAttempted = true))) return;
+			wfId = required;
+		}
+		const prompt = model || envHasPrompt ? promptForLoc(loc) : '';
+		if (prompt) {
 			await projects.updateLocation(projectId, loc.id, { consistency_prompt: prompt });
 			const { [locKey(loc.id)]: _, ...rest } = drafts;
 			drafts = rest;
@@ -436,17 +469,23 @@
 			character_ids: [],
 			location_ids: [loc.id],
 			workflow_id: wfId,
+			router_model: model ?? undefined,
 			input_values: compactInputValues(envInputValues),
 			prompt: prompt || undefined,
 		});
 	}
 
 	async function generateItem(item: Item) {
-		const wfId = requireWorkflow(itemWorkflowId, 'assets.wf.needItem');
-		if (wfId == null) return;
-		if (!requireComplete(itemMissing, () => (itemAttempted = true))) return;
-		const prompt = itemHasPrompt ? promptForItem(item) : '';
-		if (itemHasPrompt) {
+		const model = routerModelOf(itemWorkflowId);
+		let wfId: number | undefined;
+		if (!model) {
+			const required = requireWorkflow(itemWorkflowId, 'assets.wf.needItem');
+			if (required == null) return;
+			if (!requireComplete(itemMissing, () => (itemAttempted = true))) return;
+			wfId = required;
+		}
+		const prompt = model || itemHasPrompt ? promptForItem(item) : '';
+		if (prompt) {
 			await projects.updateItem(projectId, item.id, { consistency_prompt: prompt });
 			const { [itemKey(item.id)]: _, ...rest } = drafts;
 			drafts = rest;
@@ -457,6 +496,7 @@
 			location_ids: [],
 			item_ids: [item.id],
 			workflow_id: wfId,
+			router_model: model ?? undefined,
 			input_values: compactInputValues(itemInputValues),
 			prompt: prompt || undefined,
 		});
@@ -466,11 +506,21 @@
 		const chars = $assetsQuery.data?.characters ?? [];
 		const locs = $assetsQuery.data?.locations ?? [];
 		const items = $assetsQuery.data?.items ?? [];
-		const sheetWf = sheetWorkflowId === '' ? null : Number(sheetWorkflowId);
-		const envWf = envWorkflowId === '' ? null : Number(envWorkflowId);
-		const itemWf = itemWorkflowId === '' ? null : Number(itemWorkflowId);
+		const sheetModel = routerModelOf(sheetWorkflowId);
+		const envModel = routerModelOf(envWorkflowId);
+		const itemModel = routerModelOf(itemWorkflowId);
+		const sheetWf = sheetModel || sheetWorkflowId === '' ? null : Number(sheetWorkflowId);
+		const envWf = envModel || envWorkflowId === '' ? null : Number(envWorkflowId);
+		const itemWf = itemModel || itemWorkflowId === '' ? null : Number(itemWorkflowId);
 
-		if (sheetWf == null && envWf == null && itemWf == null) {
+		if (
+			!sheetModel &&
+			!envModel &&
+			!itemModel &&
+			sheetWf == null &&
+			envWf == null &&
+			itemWf == null
+		) {
 			toast.error(t('assets.wf.needWorkflow'));
 			return;
 		}
@@ -478,30 +528,33 @@
 		bulkPending = true;
 		try {
 			let total = 0;
-			if (sheetWf != null && chars.length > 0) {
+			if ((sheetModel || sheetWf != null) && chars.length > 0) {
 				const r = await projects.generateAssets(projectId, {
 					missing_only: true,
 					asset_target: 'sheet',
-					workflow_id: sheetWf,
+					workflow_id: sheetModel ? undefined : (sheetWf ?? undefined),
+					router_model: sheetModel ?? undefined,
 					character_ids: chars.map((c) => c.id),
 					input_values: compactInputValues(sheetInputValues),
 				});
 				total += r.jobs.length;
 			}
-			if (envWf != null && locs.length > 0) {
+			if ((envModel || envWf != null) && locs.length > 0) {
 				const r = await projects.generateAssets(projectId, {
 					missing_only: true,
-					workflow_id: envWf,
+					workflow_id: envModel ? undefined : (envWf ?? undefined),
+					router_model: envModel ?? undefined,
 					character_ids: [],
 					location_ids: locs.map((l) => l.id),
 					input_values: compactInputValues(envInputValues),
 				});
 				total += r.jobs.length;
 			}
-			if (itemWf != null && items.length > 0) {
+			if ((itemModel || itemWf != null) && items.length > 0) {
 				const r = await projects.generateAssets(projectId, {
 					missing_only: true,
-					workflow_id: itemWf,
+					workflow_id: itemModel ? undefined : (itemWf ?? undefined),
+					router_model: itemModel ?? undefined,
 					character_ids: [],
 					location_ids: [],
 					item_ids: items.map((it) => it.id),
@@ -638,7 +691,7 @@
 	</div>
 </div>
 
-{#if imageWorkflows.length === 0}
+{#if imageWorkflows.length === 0 && !fluxOption}
 	<p class="hint-warn">
 		{t('assets.noWorkflowPre')} <a href="/settings?tab=workflows">{t('assets.noWorkflowLink')}</a>
 		{t('assets.noWorkflowPost')}
@@ -663,17 +716,16 @@
 			<select
 				class="field-select"
 				value={sheetWorkflowId}
-				onchange={(e) => {
-					const v = e.currentTarget.value;
-					sheetWorkflowId = v ? Number(v) : '';
-				}}
+				onchange={(e) => (sheetWorkflowId = pickWorkflow(e.currentTarget.value))}
 			>
 				{#if imageWorkflows.length === 0}
 					<option value="">{t('assets.wf.none')}</option>
-				{:else}
-					{#each imageWorkflows as w}
-						<option value={w.id}>{w.name}</option>
-					{/each}
+				{/if}
+				{#each imageWorkflows as w (w.id)}
+					<option value={w.id}>{w.name}</option>
+				{/each}
+				{#if fluxOption}
+					<option value={fluxOption.value}>{fluxOption.label}</option>
 				{/if}
 			</select>
 		</label>
@@ -685,6 +737,8 @@
 				showErrors={sheetAttempted}
 				onValidityChange={(m) => (sheetMissing = m)}
 			/>
+		{:else if routerModelOf(sheetWorkflowId)}
+			<p class="muted small">{t('router.fluxHint')}</p>
 		{:else}
 			<p class="muted small">{t('assets.wf.selectSheet')}</p>
 		{/if}
@@ -694,17 +748,16 @@
 			<select
 				class="field-select"
 				value={envWorkflowId}
-				onchange={(e) => {
-					const v = e.currentTarget.value;
-					envWorkflowId = v ? Number(v) : '';
-				}}
+				onchange={(e) => (envWorkflowId = pickWorkflow(e.currentTarget.value))}
 			>
 				{#if imageWorkflows.length === 0}
 					<option value="">{t('assets.wf.none')}</option>
-				{:else}
-					{#each imageWorkflows as w}
-						<option value={w.id}>{w.name}</option>
-					{/each}
+				{/if}
+				{#each imageWorkflows as w (w.id)}
+					<option value={w.id}>{w.name}</option>
+				{/each}
+				{#if fluxOption}
+					<option value={fluxOption.value}>{fluxOption.label}</option>
 				{/if}
 			</select>
 		</label>
@@ -716,6 +769,8 @@
 				showErrors={envAttempted}
 				onValidityChange={(m) => (envMissing = m)}
 			/>
+		{:else if routerModelOf(envWorkflowId)}
+			<p class="muted small">{t('router.fluxHint')}</p>
 		{:else}
 			<p class="muted small">{t('assets.wf.selectEnv')}</p>
 		{/if}
@@ -725,17 +780,16 @@
 			<select
 				class="field-select"
 				value={itemWorkflowId}
-				onchange={(e) => {
-					const v = e.currentTarget.value;
-					itemWorkflowId = v ? Number(v) : '';
-				}}
+				onchange={(e) => (itemWorkflowId = pickWorkflow(e.currentTarget.value))}
 			>
 				{#if imageWorkflows.length === 0}
 					<option value="">{t('assets.wf.none')}</option>
-				{:else}
-					{#each imageWorkflows as w}
-						<option value={w.id}>{w.name}</option>
-					{/each}
+				{/if}
+				{#each imageWorkflows as w (w.id)}
+					<option value={w.id}>{w.name}</option>
+				{/each}
+				{#if fluxOption}
+					<option value={fluxOption.value}>{fluxOption.label}</option>
 				{/if}
 			</select>
 		</label>
@@ -747,6 +801,8 @@
 				showErrors={itemAttempted}
 				onValidityChange={(m) => (itemMissing = m)}
 			/>
+		{:else if routerModelOf(itemWorkflowId)}
+			<p class="muted small">{t('router.fluxHint')}</p>
 		{:else}
 			<p class="muted small">{t('assets.wf.selectItem')}</p>
 		{/if}
@@ -851,7 +907,7 @@
 							</div>
 							{#if jstate === 'generating'}
 								<div class="gen-bar">
-									<ProgressBar indeterminate size="sm" label="{t('assets.generating')}" />
+									<ProgressBar indeterminate size="sm" label={t('assets.generating')} />
 								</div>
 							{/if}
 						</div>
@@ -1039,7 +1095,7 @@
 							</div>
 							{#if jstate === 'generating'}
 								<div class="gen-bar">
-									<ProgressBar indeterminate size="sm" label="{t('assets.generating')}" />
+									<ProgressBar indeterminate size="sm" label={t('assets.generating')} />
 								</div>
 							{/if}
 						</div>
@@ -1095,7 +1151,7 @@
 								{/if}
 							</div>
 
-							{#if envHasPrompt}
+							{#if envHasPrompt || routerModelOf(envWorkflowId)}
 								<details class="prompt-fold">
 									<summary>{t('assets.editPrompt')}</summary>
 									<label class="prompt-field">
@@ -1215,7 +1271,7 @@
 							</div>
 							{#if jstate === 'generating'}
 								<div class="gen-bar">
-									<ProgressBar indeterminate size="sm" label="{t('assets.generating')}" />
+									<ProgressBar indeterminate size="sm" label={t('assets.generating')} />
 								</div>
 							{/if}
 						</div>
@@ -1271,7 +1327,7 @@
 								{/if}
 							</div>
 
-							{#if itemHasPrompt}
+							{#if itemHasPrompt || routerModelOf(itemWorkflowId)}
 								<details class="prompt-fold">
 									<summary>{t('assets.editPrompt')}</summary>
 									<label class="prompt-field">

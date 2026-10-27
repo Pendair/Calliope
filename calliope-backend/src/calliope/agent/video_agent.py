@@ -25,6 +25,7 @@ from calliope.agent.prompts import (
 )
 from calliope.comfyui.parser import parse_dynamic_inputs
 from calliope.comfyui.roles import input_has_role
+from calliope.comfyui.router_models import normalize_router_images, normalize_router_model
 from calliope.comfyui.smart_fill import (
     ref_audio_slots,
     ref_image_slots,
@@ -781,7 +782,11 @@ async def enqueue_video_jobs(
     input_values_override: dict[str, Any] | None = None,
     prompts: dict[int, str] | None = None,
     session_id: int | None = None,
+    router_model: str | None = None,
+    router_images: list[Any] | None = None,
+    router_duration_sec: float | None = None,
 ) -> list[dict[str, Any]]:
+    router_model = normalize_router_model(router_model, "video")
     await event_bus.publish(
         "agent.thinking", {"message": "Queuing video jobs…", "project_id": project_id}
     )
@@ -912,6 +917,14 @@ async def enqueue_video_jobs(
             payload: dict[str, Any] = {"input_values": values, "prompt": prompt}
             if session_id is not None:
                 payload["session_id"] = session_id
+            if router_model:
+                payload["router_model"] = router_model
+                payload["duration_sec"] = (
+                    router_duration_sec if router_duration_sec is not None else duration
+                )
+                images = normalize_router_images(router_images)
+                if images:
+                    payload["router_images"] = images
             pending.append(
                 {
                     "clip": clip,

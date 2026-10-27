@@ -1032,6 +1032,25 @@ export const fr: Dict = {
 	'settings.comfySection': 'ComfyUI',
 	'settings.comfyLead': "Où ComfyUI s'exécute.",
 	'settings.comfyHint': 'Doit être accessible depuis cette machine.',
+	'settings.comfyApiUrl': 'URL de l’API Comfy',
+	'settings.comfyApiHint':
+		'comfy-api-proxy devant ComfyUI (par défaut http://127.0.0.1:8189). Les jobs de workflow partent via le SDK Comfy vers cette URL.',
+	'settings.comfyApiKey': 'Clé API Comfy',
+	'settings.comfyApiKeyHint':
+		'Requise pour Comfy Router (MiniMax H3 et FLUX 3). Les workflows locaux n’en ont pas besoin. Laissez vide pour garder la clé enregistrée ; videz le champ et enregistrez pour la retirer.',
+	'settings.comfyApiKeySaved': 'Clé enregistrée',
+	'settings.comfyRouterToggle': 'Utiliser le fournisseur Comfy API (Router)',
+	'settings.comfyRouterToggleHint':
+		'Activé et avec une clé enregistrée, Projet et Agent peuvent proposer Comfy Router en plus de vos workflows locaux. Désactivé, tout passe par votre propre ComfyUI et les choix Router restent masqués, même avec une clé.',
+	'router.minimaxH3': 'Comfy Router · MiniMax H3',
+	'router.flux3': 'Comfy Router · FLUX 3',
+	'router.fluxHint': 'Génère avec FLUX 3 via Comfy Router, à partir du prompt image de cette entité.',
+	'router.h3Hint':
+		'Images de référence pour MiniMax H3, dans l’ordre. L’image 1 est la première. Ce ne sont pas une image de départ.',
+	'router.h3AddImage': 'Ajouter une image',
+	'router.h3Prompt': 'Prompt',
+	'router.imageN': 'Image {n}',
+	'router.h3NeedPrompt': 'Saisissez un prompt avant de générer.',
 	'settings.storageSection': 'Chemins système',
 	'settings.storageLead': "Où les fichiers sont stockés et où l'agent peut travailler.",
 	'settings.storageCalloutStrong': 'Changer le répertoire de données',

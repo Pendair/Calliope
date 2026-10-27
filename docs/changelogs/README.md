@@ -2,6 +2,7 @@
 
 Dated notes for GitHub releases. Newest first.
 
+- [2026-10-28 Comfy SDK, Router, and clip cards](./2026-10-28-sdk-router-canvas-clips.md) — workflow jobs submit through the Comfy SDK and a local API proxy; optional Router for MiniMax H3 and FLUX 3; each clip is a canvas card wired to its cast (1.6.2)
 - [2026-10-16 H3 latent continuation](./2026-10-16-h3-latent-continuation.md) — a clip can continue the previous clip's motion and sound when the workflow has H3 motion-context Load/Save latent nodes; hard cut on those joins; other workflows unchanged; PR #97 (1.6.0)
 - [2026-10-06 CLI authoring bridge](./2026-10-06-cli-authoring-bridge.md) — `calliope-cli`: write beats, cast, scenes, clips, and continuity from OpenCode or Cursor; long novels stay out of the in-app generator; hash guard, audit log, no delete / no model / no images-or-video; PR #92 (1.6.0)
 - [2026-10-05 deterministic prompts + agent workspace + vision speed](./2026-10-05-deterministic-prompts-workspace-vision.md) — H3 prompts compile instantly (LLM only on Regenerate); your typed prompt wins verbatim; chain/continue + Video source picker removed (video input is workflow-owned); per-session agent scratch file tools for main + sub-agents; 4K vision images resized + cached; sub-agent reasoning streams live; includes PR #83 (1.5.9)

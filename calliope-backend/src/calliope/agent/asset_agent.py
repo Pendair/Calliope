@@ -6,6 +6,7 @@ from typing import Any
 
 from calliope.agent.prompts import character_image_prompt, item_image_prompt, location_image_prompt
 from calliope.comfyui.parser import parse_dynamic_inputs
+from calliope.comfyui.router_models import first_image_in_values, normalize_router_model
 from calliope.comfyui.smart_fill import smart_fill_inputs
 from calliope.config import settings
 from calliope.db import get_db, row_to_dict
@@ -29,6 +30,16 @@ def _sanitize_input_overrides(extra: dict[str, Any] | None) -> dict[str, Any] | 
             continue
         cleaned[str(k)] = v
     return cleaned or None
+
+
+def _router_stamp(model: str | None, values: dict[str, Any]) -> dict[str, Any]:
+    if not model:
+        return {}
+    stamped: dict[str, Any] = {"router_model": model}
+    image = first_image_in_values(values)
+    if image:
+        stamped["router_image"] = image
+    return stamped
 
 
 def _get_enabled_workflow(kind: str = "image", workflow_id: int | None = None) -> dict[str, Any] | None:
@@ -60,7 +71,9 @@ async def enqueue_asset_jobs(
     asset_target: str = "sheet",
     prompt_override: str | None = None,
     session_id: int | None = None,
+    router_model: str | None = None,
 ) -> list[dict[str, Any]]:
+    router_model = normalize_router_model(router_model, "image")
     await event_bus.publish(
         "agent.thinking",
         {"message": "Preparing asset generation from saved image prompts…", "project_id": project_id},
@@ -113,6 +126,7 @@ async def enqueue_asset_jobs(
                     "asset_target": target,
                     "prompt": prompt,
                     **({"session_id": session_id} if session_id is not None else {}),
+                    **_router_stamp(router_model, values),
                 },
             )
             jobs.append(job)
@@ -155,6 +169,7 @@ async def enqueue_asset_jobs(
                         "location_id": loc["id"],
                         "prompt": prompt,
                         **({"session_id": session_id} if session_id is not None else {}),
+                        **_router_stamp(router_model, values),
                     },
                 )
                 jobs.append(job)
@@ -197,6 +212,7 @@ async def enqueue_asset_jobs(
                         "item_id": item["id"],
                         "prompt": prompt,
                         **({"session_id": session_id} if session_id is not None else {}),
+                        **_router_stamp(router_model, values),
                     },
                 )
                 jobs.append(job)

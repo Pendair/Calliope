@@ -375,3 +375,191 @@ def test_post_artifact_requires_job_or_asset(client):
     result = asyncio.run(t_post_artifact(ctx, {}))
     assert result["ok"] is False
     assert "job_id" in result["error"]
+
+
+def _insert_clip_story(project_id: int) -> dict[str, int]:
+    """Scenes and clips inserted out of playback order, plus a blank heading."""
+    conn = get_db(config_module.settings.db_path)
+    try:
+        later = int(
+            conn.execute(
+                "INSERT INTO scenes (project_id, order_index, heading, action) VALUES (?, 2, ?, ?)",
+                (project_id, "Later", "second"),
+            ).lastrowid
+        )
+        earlier = int(
+            conn.execute(
+                "INSERT INTO scenes (project_id, order_index, heading, action) VALUES (?, 1, ?, ?)",
+                (project_id, "Earlier", "first"),
+            ).lastrowid
+        )
+        blank = int(
+            conn.execute(
+                "INSERT INTO scenes (project_id, order_index, action) VALUES (?, 3, ?)",
+                (project_id, "no heading"),
+            ).lastrowid
+        )
+        c_later_2 = int(
+            conn.execute(
+                "INSERT INTO clips (scene_id, project_id, order_index) VALUES (?, ?, 2)",
+                (later, project_id),
+            ).lastrowid
+        )
+        c_later_1 = int(
+            conn.execute(
+                "INSERT INTO clips (scene_id, project_id, order_index) VALUES (?, ?, 1)",
+                (later, project_id),
+            ).lastrowid
+        )
+        c_earlier = int(
+            conn.execute(
+                "INSERT INTO clips (scene_id, project_id, order_index) VALUES (?, ?, 1)",
+                (earlier, project_id),
+            ).lastrowid
+        )
+        c_blank = int(
+            conn.execute(
+                "INSERT INTO clips (scene_id, project_id, order_index) VALUES (?, ?, 1)",
+                (blank, project_id),
+            ).lastrowid
+        )
+        conn.commit()
+        return {
+            "later": later,
+            "c_later_2": c_later_2,
+            "c_later_1": c_later_1,
+            "c_earlier": c_earlier,
+            "c_blank": c_blank,
+        }
+    finally:
+        conn.close()
+
+
+def _clip_nodes(graph: dict) -> list[dict]:
+    return [n for n in graph["nodes"] if n["entity_type"] == "clip"]
+
+
+def test_clip_nodes_follow_playback_order_and_survive_edits(client):
+    """Each clip is a card titled #N.M, stacked at x=1000. Reorder refreshes
+    the title without moving a dragged card. A deleted clip disappears and
+    does not come back. Story lines are not stored as canvas edges."""
+    from calliope.routers.canvas import ENTITY_COLUMNS, ENTITY_ROW_HEIGHT
+
+    pid = client.post("/api/projects", json={"title": "Clips", "idea": "x"}).json()["id"]
+    ids = _insert_clip_story(pid)
+    graph = client.post("/api/canvas", json={"project_id": pid}).json()
+    canvas_id = graph["canvas"]["id"]
+    clips = _clip_nodes(graph)
+    assert [(c["entity_id"], c["title"], c["y"]) for c in clips] == [
+        (ids["c_earlier"], "#1.1 · Earlier", 80.0),
+        (ids["c_later_1"], "#2.1 · Later", 80.0 + ENTITY_ROW_HEIGHT),
+        (ids["c_later_2"], "#2.2 · Later", 80.0 + 2 * ENTITY_ROW_HEIGHT),
+        (ids["c_blank"], "#3.1 · Scene 3", 80.0 + 3 * ENTITY_ROW_HEIGHT),
+    ]
+    assert all(c["x"] == ENTITY_COLUMNS["clip"] for c in clips)
+    assert graph["edges"] == []
+
+    dragged = next(c for c in clips if c["entity_id"] == ids["c_later_1"])
+    assert (
+        client.patch(
+            f"/api/canvas/{canvas_id}/nodes/{dragged['id']}",
+            json={"x": 42, "y": 90},
+        ).status_code
+        == 200
+    )
+    conn = get_db(config_module.settings.db_path)
+    try:
+        conn.execute(
+            "UPDATE scenes SET order_index = 4 WHERE id = ?",
+            (ids["later"],),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    refreshed = client.get(f"/api/canvas/{canvas_id}").json()
+    moved = next(c for c in _clip_nodes(refreshed) if c["entity_id"] == ids["c_later_1"])
+    assert moved["title"] == "#4.1 · Later"
+    assert moved["x"] == 42
+    assert moved["y"] == 90
+    sibling = next(c for c in _clip_nodes(refreshed) if c["entity_id"] == ids["c_later_2"])
+    assert sibling["title"] == "#4.2 · Later"
+    assert sibling["x"] == ENTITY_COLUMNS["clip"]
+
+    conn = get_db(config_module.settings.db_path)
+    try:
+        conn.execute("DELETE FROM clips WHERE id = ?", (ids["c_later_2"],))
+        conn.commit()
+    finally:
+        conn.close()
+
+    hidden = client.get(f"/api/canvas/{canvas_id}").json()
+    hidden_ids = {c["entity_id"] for c in _clip_nodes(hidden)}
+    assert ids["c_later_2"] not in hidden_ids
+    assert ids["c_later_1"] in hidden_ids
+    again = client.get(f"/api/canvas/{canvas_id}").json()
+    assert {c["entity_id"] for c in _clip_nodes(again)} == hidden_ids
+
+    tidy = client.post(f"/api/canvas/{canvas_id}/tidy")
+    assert tidy.status_code == 200
+    tidied = client.get(f"/api/canvas/{canvas_id}").json()
+    assert all(c["x"] == ENTITY_COLUMNS["clip"] for c in _clip_nodes(tidied))
+
+
+def test_tombstoned_clip_card_is_not_reseeded(client):
+    pid = client.post("/api/projects", json={"title": "Tomb", "idea": "x"}).json()["id"]
+    ids = _insert_clip_story(pid)
+    graph = client.post("/api/canvas", json={"project_id": pid}).json()
+    canvas_id = graph["canvas"]["id"]
+    victim = next(c for c in _clip_nodes(graph) if c["entity_id"] == ids["c_earlier"])
+    assert client.delete(f"/api/canvas/{canvas_id}/nodes/{victim['id']}").status_code == 200
+    again = client.get(f"/api/canvas/{canvas_id}").json()
+    assert ids["c_earlier"] not in {c["entity_id"] for c in _clip_nodes(again)}
+
+
+def test_sandbox_canvas_has_no_clip_nodes(client):
+    pid = client.post("/api/projects", json={"title": "HasClips", "idea": "x"}).json()["id"]
+    _insert_clip_story(pid)
+    project_graph = client.post("/api/canvas", json={"project_id": pid}).json()
+    assert _clip_nodes(project_graph)
+
+    sid = client.post("/api/agent/sessions", json={}).json()["id"]
+    sandbox = client.post("/api/canvas", json={"agent_session_id": sid}).json()
+    assert _clip_nodes(sandbox) == []
+    fetched = client.get(f"/api/canvas/{sandbox['canvas']['id']}").json()
+    assert _clip_nodes(fetched) == []
+
+
+def test_job_completed_event_carries_clip_id(client):
+    from calliope.queue.worker import QueueWorker
+
+    worker = QueueWorker()
+    event = worker._completed_event(
+        {
+            "id": 7,
+            "kind": "video",
+            "project_id": 1,
+            "clip_id": 42,
+            "payload_json": '{"prompt":"rooftop","source":"agent"}',
+        },
+        ["C:/out.mp4"],
+    )
+    assert event["clip_id"] == 42
+    assert event["job_id"] == 7
+    assert event["kind"] == "video"
+    assert event["source"] == "agent"
+    assert event["prompt"] == "rooftop"
+    assert event["outputs"] == ["C:/out.mp4"]
+    assert event["message"].endswith("1 file(s)")
+
+    image = worker._completed_event(
+        {
+            "id": 8,
+            "kind": "image",
+            "project_id": 1,
+            "clip_id": None,
+            "payload_json": "{}",
+        },
+        ["C:/out.png"],
+    )
+    assert image["clip_id"] is None

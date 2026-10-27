@@ -160,7 +160,12 @@ def user_allows_render(ctx: ToolContext) -> bool:
     if session_log.latest_user_has_workflow_tag(ctx.session_id):
         return True
     latest = session_log.latest_user_message(ctx.session_id) or ""
-    return is_render_request(latest) or is_confirmation(latest)
+    if is_render_request(latest) or is_confirmation(latest):
+        return True
+    # A complaint after an approval is not a new order and not a cancel.
+    from calliope.agent.harness.workflow_memory import prior_render_still_stands
+
+    return prior_render_still_stands(ctx.session_id)
 
 
 # ── Shell permission (run_command) ────────────────────────────────────────
@@ -253,6 +258,10 @@ def latest_answer(session_id: int) -> dict[str, Any] | None:
     click IS a user message). Scanning backwards: a user/message whose
     immediately preceding event is question/answered IS that answer; any
     other user/message is fresh prose and invalidates earlier approvals.
+
+    Render is the exception: `has_structured_approval(..., "render")` keeps
+    a yes across a later complaint. This function stays strict for every
+    other scope, so a replace-card yes does not survive into a later turn.
     """
     from calliope.agent.harness import log as session_log
     from calliope.agent.harness.log import read_events
@@ -269,11 +278,46 @@ def latest_answer(session_id: int) -> dict[str, Any] | None:
     return None
 
 
+def _render_card_still_stands(session_id: int) -> bool:
+    """A render-card yes stays until the user cancels it or changes the task."""
+    from calliope.agent.harness import log as session_log
+    from calliope.agent.harness.log import read_events
+    from calliope.agent.harness.workflow_memory import _NEW_TASK_RE, _REVOKE_RENDER_RE
+
+    events = read_events(session_id)
+    answer_at: int | None = None
+    for i, ev in enumerate(events):
+        if ev.type != session_log.QUESTION_ANSWERED:
+            continue
+        if ev.data.get("scope") != "render":
+            continue
+        if _answer_is_affirmative(str(ev.data.get("answer") or "")):
+            answer_at = i
+        else:
+            answer_at = None
+    if answer_at is None:
+        return False
+    for ev in events[answer_at + 1 :]:
+        if ev.type != session_log.USER_MESSAGE:
+            continue
+        text = str(ev.data.get("content") or "")
+        if _REVOKE_RENDER_RE.search(text):
+            return False
+        if _NEW_TASK_RE.search(text) and not is_render_request(text):
+            return False
+    return True
+
+
 def has_structured_approval(ctx: ToolContext, scope: str) -> bool:
-    """True when the latest user-originated input answered a question card
-    with the given scope affirmatively. `scope: info` never grants."""
+    """True when a question card for `scope` was answered yes.
+
+    `scope: info` never grants. A render yes survives a later complaint.
+    Replace and shell still require that yes to be the latest input.
+    """
     if scope == "info":
         return False
+    if scope == "render" and _render_card_still_stands(ctx.session_id):
+        return True
     answer = latest_answer(ctx.session_id)
     if not answer or answer.get("scope") != scope:
         return False

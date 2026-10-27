@@ -11,6 +11,7 @@
 		Background,
 		BackgroundVariant,
 		Panel,
+		type Edge,
 		type Node,
 		type Viewport,
 	} from '@xyflow/svelte';
@@ -24,6 +25,7 @@
 	import ImageLightbox from '$lib/components/ImageLightbox.svelte';
 	import EntityNode from '$lib/canvas/EntityNode.svelte';
 	import ArtifactNodeComp from '$lib/canvas/ArtifactNode.svelte';
+	import { clipPresentation, currentClipPaths, storyEdges } from '$lib/canvas/storyEdges';
 	import Icon from '$lib/components/ui/Icon.svelte';
 	import { t } from '$lib/i18n.svelte';
 	import { storageGet, storageSet } from '$lib/storage';
@@ -34,6 +36,7 @@
 		jobsApi,
 		playgroundApi,
 		projects,
+		settings as settingsApi,
 		workflows,
 		type AgentMessage,
 		type AgentPlan,
@@ -108,19 +111,18 @@
 		}
 		if (node.entity_type === 'scene') {
 			const s = scenes.find((x) => x.id === node.entity_id);
-			// Project > Videos pattern: env image poster, first ready clip
-			// fallback; only real video files count (guard mirrors
-			// QueueStage.previewPath). A scene's clips are the renderables —
-			// the card plays the scene's first ready clip.
-			const firstReady = (s?.clips ?? []).find(
-				(c) => c.clip_path && /\.(mp4|webm)$/i.test(c.clip_path),
-			);
-			const clip = firstReady?.clip_path
-				? firstReady.clip_path
-				: s?.video_path && /\.(mp4|webm)$/i.test(s.video_path)
-					? s.video_path
-					: null;
-			return { imagePath: s?.env_image_path ?? null, videoPath: clip };
+			// The scene card is the screenplay unit. Its video lives on the
+			// clip cards; this card keeps the environment still.
+			return { imagePath: s?.env_image_path ?? null, videoPath: null };
+		}
+		if (node.entity_type === 'clip') {
+			for (const s of scenes) {
+				const clip = (s.clips ?? []).find((c) => c.id === node.entity_id);
+				if (!clip) continue;
+				const video =
+					clip.clip_path && /\.(mp4|webm)$/i.test(clip.clip_path) ? clip.clip_path : null;
+				return { imagePath: null, videoPath: video };
+			}
 		}
 		return { imagePath: null, videoPath: null };
 	}
@@ -134,6 +136,7 @@
 	// $state.raw: Svelte Flow v1 treats node arrays as immutable — it mutates
 	// internally, so proxies must never reach it.
 	let nodes = $state.raw<Node[]>([]);
+	let edges = $state.raw<Edge[]>([]);
 
 	// ---- media preview (lightbox) ------------------------------------------
 	// Card clicks open the large preview here; nothing navigates away.
@@ -170,6 +173,7 @@
 		if (!graph) {
 			loadedGraphAt = 0;
 			nodes = [];
+			edges = [];
 			return;
 		}
 		loadedGraphAt = Date.now();
@@ -187,10 +191,28 @@
 				tracked ? tracked.status === 'running' || tracked.status === 'pending' : false,
 			);
 		}
+		const liveClipPaths = currentClipPaths(scenes);
+		edges = storyEdges(graph.nodes, scenes);
 		nodes = graph.nodes
 			.filter((n) => n.type !== 'workflow')
+			.filter((n) => {
+				// The clip card already shows this file. An older artifact
+				// with the same path would be a second copy of the current take.
+				if (
+					(n.type === 'image' || n.type === 'video') &&
+					n.artifact_path &&
+					liveClipPaths.has(n.artifact_path)
+				) {
+					return false;
+				}
+				return true;
+			})
 			.map((n) => {
 				const media = mediaFor(n, characters, locations, items, scenes);
+				const clipView =
+					n.entity_type === 'clip' && n.entity_id != null
+						? clipPresentation(scenes, n.entity_id)
+						: null;
 				if (n.type === 'image' || n.type === 'video') {
 					return {
 						id: `cn-${n.id}`,
@@ -207,20 +229,29 @@
 						},
 					};
 				}
+				const caption = clipView
+					? `${clipView.mention} · ${clipView.subtitle}`
+					: (n.title ?? 'Untitled');
 				return {
 					id: `cn-${n.id}`,
 					type: 'entity' as const,
 					position: { x: n.x, y: n.y },
 					data: {
 						canvasNodeId: n.id,
-						entityType: n.entity_type as 'character' | 'location' | 'item' | 'scene',
-						title: n.title ?? 'Untitled',
+						entityType: n.entity_type as
+							| 'character'
+							| 'location'
+							| 'item'
+							| 'scene'
+							| 'clip',
+						title: clipView?.subtitle ?? n.title ?? 'Untitled',
+						mention: clipView?.mention ?? null,
 						imagePath: media.imagePath,
 						videoPath: media.videoPath,
 						onOpenMedia: (kind: 'image' | 'video') =>
 							kind === 'video'
-								? openMediaPreview('video', media.videoPath, n.title ?? 'Untitled')
-								: openMediaPreview('image', media.imagePath, n.title ?? 'Untitled'),
+								? openMediaPreview('video', media.videoPath, caption)
+								: openMediaPreview('image', media.imagePath, caption),
 					},
 				};
 			});
@@ -462,6 +493,15 @@
 		queryKey: ['workflows'],
 		queryFn: workflows.list,
 	});
+	const settingsQuery = createQuery({
+		queryKey: ['settings'],
+		queryFn: settingsApi.get,
+	});
+	const routerRowLabel = $derived(
+		$settingsQuery.data?.comfy_api_key && $settingsQuery.data?.comfy_router_enabled
+			? t('router.minimaxH3')
+			: null,
+	);
 	const enabledWorkflows = $derived<WorkflowOption[]>(
 		($workflowsQuery.data ?? [])
 			.filter((w) => w.is_enabled)
@@ -800,6 +840,11 @@
 									: 'done',
 						};
 					}
+					// Script and cast edits land as tool results. Refetch the
+					// board so new clip cards and story lines appear without a
+					// reload. Thinking-token deltas must not do this.
+					client.invalidateQueries({ queryKey: ['canvas', canvasId] });
+					client.invalidateQueries({ queryKey: ['canvas-scenes'] });
 				}
 			} else if (ev.type === 'agent.plan') {
 				if (ev.data?.session_id !== activeId) return;
@@ -853,6 +898,10 @@
 	async function materializeJobArtifact(data: Record<string, unknown> | undefined) {
 		const jobId = Number(data?.job_id ?? NaN);
 		if (!Number.isFinite(jobId)) return;
+		// A project clip render already has a card. Posting the file again
+		// would leave an unconnected duplicate beside it.
+		const clipId = Number(data?.clip_id);
+		if (Number.isFinite(clipId) && clipId > 0) return;
 		// Scope: project canvases take their own project's jobs; sandbox
 		// canvases take jobs the agent enqueued (source:"agent" stamped by
 		// the worker on the event — no race with the jobs poll). Other
@@ -1111,8 +1160,10 @@ title={running
 
 				<SvelteFlow
 					bind:nodes
+					bind:edges
 					bind:viewport
 					{nodeTypes}
+					nodesConnectable={false}
 					colorMode="dark"
 					minZoom={0.05}
 					maxZoom={4}
@@ -1214,6 +1265,7 @@ title={running
 						draft={composerDraft}
 						draftNonce={composerNonce}
 						workflows={enabledWorkflows}
+						routerOption={routerRowLabel}
 						skills={skillOptions}
 						onSend={handleSend}
 						onCancel={cancelRun}

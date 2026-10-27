@@ -74,6 +74,9 @@ async def generate_videos(
             workflow_id=body.workflow_id,
             input_values_override=body.input_values,
             prompts=body.prompts,
+            router_model=body.router_model,
+            router_images=body.router_images,
+            router_duration_sec=body.duration_sec,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

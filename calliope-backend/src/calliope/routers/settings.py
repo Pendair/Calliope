@@ -55,6 +55,9 @@ class SettingsUpdate(BaseModel):
     llm_active_id: str | None = None
     agent_llm_assignments: dict[str, str | None] | None = None
     comfyui_base_url: str | None = None
+    comfy_api_base_url: str | None = None
+    comfy_api_key: str | None = Field(None, max_length=4000)
+    comfy_router_enabled: bool | None = None
     data_dir: str | None = None
     assets_dir: str | None = None
     agent_workspace_dir: str | None = None
@@ -185,6 +188,17 @@ async def update_settings(payload: SettingsUpdate) -> dict[str, Any]:
             setattr(settings, key, bool(value))
             continue
         if key == "h3_rewrite_vision":
+            setattr(settings, key, bool(value))
+            continue
+        if key == "comfy_api_key":
+            text = value.strip() if isinstance(value, str) else ""
+            settings.comfy_api_key = text or None
+            continue
+        if key == "comfy_api_base_url":
+            text = value.strip() if isinstance(value, str) else ""
+            settings.comfy_api_base_url = text or "http://127.0.0.1:8189"
+            continue
+        if key == "comfy_router_enabled":
             setattr(settings, key, bool(value))
             continue
         setattr(settings, key, value)

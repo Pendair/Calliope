@@ -12,7 +12,6 @@ from typing import Any
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 # calliope-backend/ — permanent home for config + default data (never %TEMP%)
 # PyInstaller-frozen exe: __file__ points inside the bundle (_internal/), which is
 # not where a portable app should keep user data. Anchor config + default data
@@ -186,7 +185,15 @@ class Settings(BaseSettings):
     agent_llm_assignments: dict[str, str | None] = Field(default_factory=dict)
 
     comfyui_base_url: str = "http://127.0.0.1:8188"
-    # Comfy is HTTP-only (upload / prompt / history / view). No local input/output dirs.
+    # Comfy API v2, served by comfy-api-proxy in front of the ComfyUI above.
+    # The SDK reads this as COMFY_BASE_URL when a client is constructed.
+    comfy_api_base_url: str = "http://127.0.0.1:8189"
+    # Workspace key for Comfy Router (and for a Cloud / deployment proxy).
+    # Local proxy jobs do not need it. Never returned by the settings API.
+    comfy_api_key: str | None = None
+    # Master switch for the Comfy API provider (Router). Off keeps every
+    # generate on the local SDK path even when a key is saved.
+    comfy_router_enabled: bool = False
 
     queue_concurrency: int = 1
     queue_poll_interval_sec: float = 2.0
@@ -527,6 +534,9 @@ class Settings(BaseSettings):
             "llm_max_output_tokens": int(self.llm_max_output_tokens),
             "agent_llm_assignments": dict(self.agent_llm_assignments or {}),
             "comfyui_base_url": self.comfyui_base_url,
+            "comfy_api_base_url": self.comfy_api_base_url,
+            "comfy_api_key": bool(self.comfy_api_key),
+            "comfy_router_enabled": self.comfy_router_enabled,
             "queue_concurrency": self.queue_concurrency,
             "queue_poll_interval_sec": self.queue_poll_interval_sec,
             "queue_poll_timeout_sec": self.queue_poll_timeout_sec,
@@ -634,6 +644,9 @@ class Settings(BaseSettings):
             "llm_active_id": self.llm_active_id,
             "agent_llm_assignments": dict(self.agent_llm_assignments or {}),
             "comfyui_base_url": self.comfyui_base_url,
+            "comfy_api_base_url": self.comfy_api_base_url,
+            "comfy_api_key": self.comfy_api_key,
+            "comfy_router_enabled": self.comfy_router_enabled,
             "queue_concurrency": self.queue_concurrency,
             "queue_poll_interval_sec": self.queue_poll_interval_sec,
             "queue_poll_timeout_sec": self.queue_poll_timeout_sec,

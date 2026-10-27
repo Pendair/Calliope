@@ -28,6 +28,11 @@ from calliope.agent.harness.registry import (
     allow,
     deny,
 )
+from calliope.agent.harness.workflow_memory import (
+    chosen_workflow,
+    is_workflow_picker,
+    user_asks_to_change_workflow,
+)
 
 logger = logging.getLogger("calliope.harness")
 
@@ -66,19 +71,21 @@ def _user_confirmed_replacement(ctx: ToolContext) -> bool:
 
     if has_structured_approval(ctx, "destructive_replace"):
         return True
-    return is_confirmation(session_log.latest_user_message(ctx.session_id) or "")
+    from calliope.agent.harness.workflow_memory import message_confirms_replacement
+
+    latest = session_log.latest_user_message(ctx.session_id) or ""
+    return message_confirms_replacement(latest)
 
 
 def _render_approval_guard(ctx: ToolContext, t: ToolDefinition, args: dict) -> PreExecuteDecision:
     """Human-in-the-loop guard for image/video generation.
 
     Rendering (enqueue_asset_jobs / enqueue_video_jobs / run_workflow)
-    queues real, expensive, side-effecting work. It must never run unless
-    the user's latest message explicitly asks for generation, or tersely confirms
-    the agent's offer. Text edits (add_item, add_character, add_location,
-    update_scene, generate_story/script, …) do NOT grant render permission —
-    this is what previously let the assets-agent auto-generate images after a
-    "create a Misc. Item" request.
+    queues real, expensive, side-effecting work. It runs when the user asked
+    for generation or confirmed it. A later complaint does not cancel that
+    yes. A new task ("add a character") or a cancel does. Text edits do NOT
+    grant render permission — this is what previously let the assets-agent
+    auto-generate images after a "create a Misc. Item" request.
     """
     if not t.requires_approval:
         return allow()
@@ -90,6 +97,34 @@ def _render_approval_guard(ctx: ToolContext, t: ToolDefinition, args: dict) -> P
         "edits, then ASK whether they want images/videos generated — do not enqueue "
         "until they confirm (e.g. 'yes, generate the images').",
         code=GUARD_RENDER_APPROVAL,
+    )
+
+
+def _workflow_reask_guard(ctx: ToolContext, t: ToolDefinition, args: dict) -> PreExecuteDecision:
+    """Stop a second 'which workflow?' card after the user already picked one.
+
+    Yes/no generate confirms still pass. A message that asks to switch
+    workflows unlocks a new menu.
+    """
+    if t.name != "ask_user":
+        return allow()
+    chosen = chosen_workflow(ctx.session_id)
+    if not chosen:
+        return allow()
+    from calliope.agent.harness import log as session_log
+
+    latest = session_log.latest_user_message(ctx.session_id) or ""
+    if user_asks_to_change_workflow(latest):
+        return allow()
+    question = str(args.get("question") or "")
+    raw_options = args.get("options") or []
+    options = [str(opt) for opt in raw_options] if isinstance(raw_options, list) else []
+    if not is_workflow_picker(question, options):
+        return allow()
+    return deny(
+        f"The user already chose workflow_id={chosen['id']} ({chosen['name']}). "
+        "Do not ask which workflow. Call run_workflow or enqueue_asset_jobs "
+        f"with workflow_id={chosen['id']}."
     )
 
 
@@ -139,6 +174,11 @@ def _destructive_guard(ctx: ToolContext, t: ToolDefinition, args: dict) -> PreEx
         ).fetchone()["n"]
     finally:
         conn.close()
+    # generate_script deletes or appends SCENES only. Beats and characters
+    # stay. The first script on a project that has a story but zero scenes
+    # is the user's "create scenes" request, not a rewrite.
+    if t.name == "generate_script" and scenes == 0:
+        return allow()
     has_content = (scenes + beats + chars + locs + items) > 0
     if not has_content:
         return allow()
@@ -148,24 +188,33 @@ def _destructive_guard(ctx: ToolContext, t: ToolDefinition, args: dict) -> PreEx
         f"Project #{ctx.project_id} already has content ({scenes} scenes, {beats} beats, "
         f"{chars} characters, {locs} locations, {items} items)."
     )
+    if t.name == "generate_script":
+        action = "replace the existing scenes" if replace else "append a second script"
+        return deny(
+            counts + f" generate_script would {action}. "
+            "Beats and characters are not touched. "
+            "Call it only after the user asks to recreate the scenes, or after "
+            "ask_user with scope='destructive_replace' is answered yes.",
+            code=GUARD_DESTRUCTIVE_REPLACE,
+        )
     if replace:
         return deny(
             counts + " replace=true DELETES all of it first, and the user's "
-            "latest message did not ask for a replacement. Ask them once "
-            "(ask_user or plain text: 'replace the existing content?'); "
-            "after ANY affirmative reply, retry replace=true — it will be "
-            "allowed. Do not retry replace=true again before they answer; "
-            "do not call get_workspace repeatedly instead. For targeted "
-            "changes use the granular tools (add/update/delete) instead.",
+            "latest message did not ask to replace the story or script. "
+            "A yes to generating images does not allow this. "
+            "For targeted changes use the granular tools (add/update/delete). "
+            "Call generate_story only after they ask to rewrite it, or after "
+            "ask_user with scope='destructive_replace' is answered yes. "
+            "Do not retry replace=true before that.",
             code=GUARD_DESTRUCTIVE_REPLACE,
         )
     return deny(
         counts + " replace=false would APPEND a second full set alongside "
-        "the existing content (e.g. doubling the beat list). Ask the user "
-        "whether to replace or append; after ANY affirmative reply retry — "
-        "it will be allowed. Do not retry either mode again before they "
-        "answer. For targeted changes use the granular tools "
-        "(add/update/delete) instead.",
+        "the existing content (e.g. doubling the beat list). "
+        "A yes to generating images does not allow this. "
+        "Use the granular tools (add/update/delete) instead. "
+        "Do not retry either mode unless they ask to rewrite the story or "
+        "script, or answer a scope='destructive_replace' question.",
         code=GUARD_DESTRUCTIVE_REPLACE,
     )
 
@@ -211,6 +260,7 @@ def build_harness() -> tuple[ToolRegistry, SystemPromptService]:
     files.register(registry)
     registry.on_pre_execute(_destructive_guard)
     registry.on_pre_execute(_render_approval_guard)
+    registry.on_pre_execute(_workflow_reask_guard)
     register_builtin_sections(prompts)
     _registry, _prompts = registry, prompts
     _BUILT = True

@@ -177,6 +177,11 @@ export interface Settings {
 	llm_profiles: LlmProfile[];
 	llm_active_id: string | null;
 	comfyui_base_url: string;
+	comfy_api_base_url: string;
+	/** True when a Comfy API key is saved. The key itself is never sent to the browser. */
+	comfy_api_key: boolean;
+	/** Master switch for the Comfy API provider (Router choices in Project / Agent). */
+	comfy_router_enabled: boolean;
 	queue_concurrency: number;
 	queue_poll_interval_sec: number;
 	queue_poll_timeout_sec: number;
@@ -344,6 +349,7 @@ export const projects = {
 			input_values?: Record<string, unknown>;
 			asset_target?: 'sheet';
 			prompt?: string;
+			router_model?: string;
 		} = {},
 	) =>
 		api<{ ok: boolean; jobs: Job[] }>(`/api/projects/${id}/generate-assets`, {
@@ -441,6 +447,9 @@ export const jobsApi = {
 			workflow_id?: number;
 			input_values?: Record<string, unknown>;
 			prompts?: Record<string, string>;
+			router_model?: string;
+			router_images?: { path: string; name: string }[];
+			duration_sec?: number;
 		} = {},
 	) =>
 		api<{ ok: boolean; jobs: Job[] }>(`/api/jobs/projects/${projectId}/generate-videos`, {

@@ -41,11 +41,14 @@
 
 	let draft = $state<Record<string, unknown>>({});
 	let apiKeyDrafts = $state<Record<string, string>>({});
+	let comfyKeyDraft = $state('');
+	let comfyKeyTouched = $state(false);
 
 	// Dirty tracking: any staged field (draft map or a typed API key) counts.
 	const dirtyKeys = $derived([
 		...Object.keys(draft).filter((k) => draft[k] !== undefined),
 		...(Object.values(apiKeyDrafts).some((v) => v) ? ['llm_api_key'] : []),
+		...(comfyKeyTouched ? ['comfy_api_key'] : []),
 	]);
 	const isDirty = $derived(dirtyKeys.length > 0);
 
@@ -54,6 +57,9 @@
 		llm_active_id: 'llm',
 		llm_api_key: 'llm',
 		comfyui_base_url: 'comfy',
+		comfy_api_base_url: 'comfy',
+		comfy_api_key: 'comfy',
+		comfy_router_enabled: 'comfy',
 		dry_run: 'comfy',
 		queue_concurrency: 'queue',
 		queue_poll_interval_sec: 'queue',
@@ -129,6 +135,8 @@
 	function discardDraft() {
 		draft = {};
 		apiKeyDrafts = {};
+		comfyKeyDraft = '';
+		comfyKeyTouched = false;
 	}
 
 	const saveMutation = createMutation({
@@ -168,6 +176,7 @@
 			if (typeof draft.llm_active_id === 'string' && draft.llm_active_id) {
 				update.llm_active_id = draft.llm_active_id;
 			}
+			if (comfyKeyTouched) update.comfy_api_key = comfyKeyDraft;
 			return settings.update(update);
 		},
 		onSuccess: (saved) => {
@@ -230,6 +239,11 @@
 	function dryRunChecked(s: Settings): boolean {
 		if (draft.dry_run !== undefined) return Boolean(draft.dry_run);
 		return s.dry_run === true;
+	}
+
+	function routerChecked(s: Settings): boolean {
+		if (draft.comfy_router_enabled !== undefined) return Boolean(draft.comfy_router_enabled);
+		return s.comfy_router_enabled === true;
 	}
 
 	function shellChecked(s: Settings): boolean {
@@ -783,6 +797,41 @@
 							/>
 							<p class="field-hint">{t('settings.comfyHint')}</p>
 						</label>
+						<label class="field">
+							<span class="field-label">{t('settings.comfyApiUrl')}</span>
+							<input
+								class="field-input"
+								value={String(fieldValue('comfy_api_base_url', s.comfy_api_base_url))}
+								oninput={(e) => (draft.comfy_api_base_url = e.currentTarget.value)}
+							/>
+							<p class="field-hint">{t('settings.comfyApiHint')}</p>
+						</label>
+						<label class="field">
+							<span class="field-label">{t('settings.comfyApiKey')}</span>
+							<input
+								class="field-input"
+								type="password"
+								autocomplete="off"
+								value={comfyKeyDraft}
+								oninput={(e) => {
+									comfyKeyTouched = true;
+									comfyKeyDraft = e.currentTarget.value;
+								}}
+								placeholder={s.comfy_api_key
+									? t('settings.comfyApiKeySaved')
+									: t('settings.apiKeyOptional')}
+							/>
+							<p class="field-hint">{t('settings.comfyApiKeyHint')}</p>
+						</label>
+						<label class="check">
+							<input
+								type="checkbox"
+								checked={routerChecked(s)}
+								onchange={(e) => (draft.comfy_router_enabled = e.currentTarget.checked)}
+							/>
+							{t('settings.comfyRouterToggle')}
+						</label>
+						<p class="field-hint">{t('settings.comfyRouterToggleHint')}</p>
 						<label class="check">
 							<input
 								type="checkbox"

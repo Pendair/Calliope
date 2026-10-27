@@ -26,6 +26,18 @@ from calliope.agent.harness.loop import (
 )
 from calliope.agent.harness.prompts import hardening_text
 from calliope.agent.harness.registry import ToolContext
+from calliope.agent.harness.workflow_memory import (
+    chosen_workflow,
+    format_choice,
+    conversation_for_agent,
+    latest_message_names_other_work,
+    recent_user_texts,
+    task_is_script_work,
+    task_rewrites_story,
+    user_already_approved_generation,
+    user_asked_for_script,
+    user_asked_to_rewrite_story,
+)
 from calliope.agent.llm import LLMClient
 from calliope.config import settings
 from calliope.events.bus import event_bus
@@ -334,13 +346,14 @@ Respond with ONLY a JSON object:
 }
 
 Rules:
-- The standard EDIT pipeline (story → script → add/update assets text) is swarm work: one task per role, in that order.
+- If the project already has beats, characters, or scenes, that content is finished. Do not plan, mention, or reason about generate_story, generate_script, a rewrite, or a scene list unless the user's latest request explicitly asks to recreate that part. An EXISTING STORY line in the message is binding. "You are not working" means do the job they already approved. Never tell a sub-agent "do not ask the user" and then invent a scene list.
 - ROLE BOUNDARIES: the story role owns the STORY BOARD — beats, characters, locations and items (generate_story, add_beat, add_character/add_location/add_item). generate_story seeds the cast only if the model's brief included it, and it reports the true count of every table it wrote (`generated.characters` etc.), so a story task that names the cast must check those numbers and add whatever came back missing rather than reporting an empty cast (observed 2026-10-03: the tool said "beats: 50" only, the agent concluded the cast did not exist, and stopped). The script role owns SCENES and the script (generate_script, break_into_shots, add_scene). Schedule scene work under the script role.
 - Image/video GENERATION is human-in-the-loop, but the user's EXPLICIT choices grant permission: tagging a workflow (@mention), asking to "generate/render/create an image", or confirming an offer all count. When the user tagged a workflow AND named entities (characters/locations/scenes), schedule a single assets task whose goal says: run_workflow with the tagged workflow_id + per-entity prompts (character_ids=[…] for multiple characters), wait_for_jobs, then post_artifact_to_canvas for each output.
 - When ANY task involves generating videos/clips (enqueue_video_jobs / run_workflow for clips), the video role's tools are visible only if the user's message carries render intent — phrase that task's goal so the sub-agent first calls ask_user to confirm scope when unsure, rather than reporting "the generation tool is not exposed". Never schedule a render task and a text-only pass of the same scope.
 - For text-only edits (add/update characters, locations, items, scenes, story, script) with NO generation ask, schedule the edit task and DO NOT schedule render tasks.
 - Film clips: video sub-agent must enqueue_video_jobs with orders (#N on Video) or scene_ids from list_scenes — ONLY the clips the user named. Never dump every scene_id. Never add_scene to attach a generated mp4. Orphan jobs (scene_id null) do not show on the Video timeline.
 - A tagged workflow ([Calliope context] with workflow_id=) with entities named is a generation request: one assets task covers the text updates AND the render (the assets role has run_workflow/enqueue_asset_jobs). Never end a turn saying you lack enqueue access — the assets sub-agent has it.
+- A CHOSEN WORKFLOW line is binding. Its number is the workflow id, never a count of sheets or images. Put that workflow_id in the assets/video task goal. Do not tell the sub-agent to ask which workflow, and do not tell it to confirm what the number means.
 - Tasks run in the order you list them. Later tasks can use earlier results.
 - Keep task goals concrete and self-contained; each sub-agent sees the project state fresh.
 - 2-4 tasks typical. Never more than 6.
@@ -386,8 +399,14 @@ def _scoped_payload(ctx: ToolContext, allowed: list[str]) -> list[dict[str, Any]
     return out
 
 
-async def _plan(goal: str, workspace_summary: str, session_id: int) -> dict[str, Any]:
+async def _plan(
+    goal: str,
+    workspace_summary: str,
+    session_id: int,
+    preface: str = "",
+) -> dict[str, Any]:
     client = _llm_for_role("planner")
+    preface_block = f"{preface.strip()}\n\n" if preface.strip() else ""
     try:
         content: list[str] = []
         async for ev in client.chat_stream(
@@ -395,7 +414,9 @@ async def _plan(goal: str, workspace_summary: str, session_id: int) -> dict[str,
                 {"role": "system", "content": PLANNER_SYSTEM},
                 {
                     "role": "user",
-                    "content": f"Goal: {goal}\n\nProject state:\n{workspace_summary}",
+                    "content": (
+                        f"{preface_block}Goal: {goal}\n\nProject state:\n{workspace_summary}"
+                    ),
                 },
             ],
             temperature=0.2,
@@ -494,8 +515,112 @@ async def orchestrate(
     if len(summary) > 3000:
         summary = summary[:3000] + "…[truncated]"
 
-    plan = await _plan(goal, summary, session_id)
+    # The planner otherwise sees only the latest line. A card click of
+    # "Yes, generate the 4 images" then looks like a new request, and the
+    # workflow id inside "35 krea2_…" gets planned as a sheet count.
+    choice = chosen_workflow(session_id)
+    preface_parts: list[str] = []
+    # The planner reasons in public before any task is dropped. If the board
+    # already exists, say so first, or it will "think" its way into a rewrite
+    # just because the pipeline used to be story → script → assets.
+    stats = ws_result.get("stats") if isinstance(ws_result, dict) else None
+    beats = ws_result.get("beats") if isinstance(ws_result, dict) else None
+    has_existing = bool(beats) or (
+        isinstance(stats, dict)
+        and (
+            int(stats.get("character_count") or 0) > 0
+            or int(stats.get("scene_count") or 0) > 0
+        )
+    )
+    if has_existing and not user_asked_to_rewrite_story(session_id):
+        hold = (
+            "EXISTING STORY: beats, characters, or scenes are already created. "
+            "Do not plan, mention, or reason about generate_story or rewriting "
+            "the storyline."
+        )
+        if not user_asked_for_script(session_id):
+            hold += (
+                " Do not plan, mention, or reason about generate_script or a "
+                "scene list either."
+            )
+        preface_parts.append(hold)
+    if choice:
+        preface_parts.append(format_choice(choice))
+    earlier = recent_user_texts(session_id)
+    if len(earlier) > 1:
+        lines = "\n".join(f"- {line}" for line in earlier[:-1])
+        preface_parts.append(
+            "Earlier user messages (context only; the Goal is the latest request):\n" + lines
+        )
+    plan = await _plan(goal, summary, session_id, preface="\n\n".join(preface_parts))
     note = (plan.get("note") or "").strip()
+    swarm = plan.get("mode") == "swarm" and bool(plan.get("tasks"))
+
+    # ── Swarm path ──────────────────────────────────────────────
+    # Planner output is LLM JSON — roles can be typos or invented names
+    # ("asset", "renderer"). Silent fallback ran the task with the script
+    # toolset; clamp to story instead and RECORD the clamp so the plan event
+    # and the user-facing note both surface it (finding 5).
+    norm_tasks: list[dict[str, str]] = []
+    clamped_roles: list[dict[str, str]] = []
+    if swarm:
+        valid_roles = set(ROLE_TOOLS)
+        for idx, t in enumerate(plan["tasks"]):
+            raw_role = str(t.get("role") or "story").strip()
+            role = raw_role if raw_role in valid_roles else "story"
+            if role != raw_role:
+                clamped_roles.append({"from": raw_role, "to": role, "index": idx})
+            norm_tasks.append(
+                {
+                    "role": role,
+                    "goal": (t.get("goal") or goal).strip(),
+                }
+            )
+        # Session 974: "you are not working, do the image prompts" was planned
+        # as generate_script + break_into_shots. The user had already said yes
+        # to the character images. Drop scene work they did not ask for, and
+        # send the approved render instead of another prompt-drafting pass.
+        if not user_asked_for_script(session_id):
+            norm_tasks = [
+                t for t in norm_tasks if not task_is_script_work(t["role"], t["goal"])
+            ]
+        dropped_story = False
+        if not user_asked_to_rewrite_story(session_id):
+            kept_tasks = []
+            for task in norm_tasks:
+                if task_rewrites_story(task["role"], task["goal"]):
+                    dropped_story = True
+                    continue
+                kept_tasks.append(task)
+            norm_tasks = kept_tasks
+        if (
+            choice
+            and user_already_approved_generation(session_id)
+            and not user_asked_for_script(session_id)
+            and not latest_message_names_other_work(session_id)
+        ):
+            norm_tasks = [
+                {
+                    "role": "assets",
+                    "goal": (
+                        "The user already approved this. Call run_workflow with "
+                        f"workflow_id={choice['id']} ({choice['name']}) for the "
+                        "existing characters. Do not generate a script, do not ask "
+                        "which workflow, and do not draft prompts instead of rendering."
+                    ),
+                }
+            ]
+            clamped_roles = []
+            note = (
+                f"Generating the character images with {choice['name']} "
+                f"(workflow {choice['id']}). No script."
+            )
+        elif not norm_tasks:
+            swarm = False
+            note = "Not writing a script — that was not part of the request."
+        elif dropped_story:
+            note = "Keeping the existing story. That was not a request to rewrite it."
+
     if note:
         session_log.append_event(
             session_id,
@@ -504,31 +629,12 @@ async def orchestrate(
         )
         await emit({"role": "assistant", "agent_name": "planner", "content": note})
 
-    if plan.get("mode") != "swarm" or not plan.get("tasks"):
+    if not swarm:
         # Single loop path (history already includes the user message).
         history.clear()
         history.extend(derived)
         return await run_turn(ctx, history, on_message=on_message)
 
-    # ── Swarm path ──────────────────────────────────────────────
-    # Planner output is LLM JSON — roles can be typos or invented names
-    # ("asset", "renderer"). Silent fallback ran the task with the script
-    # toolset; clamp to story instead and RECORD the clamp so the plan event
-    # and the user-facing note both surface it (finding 5).
-    valid_roles = set(ROLE_TOOLS)
-    norm_tasks: list[dict[str, str]] = []
-    clamped_roles: list[dict[str, str]] = []
-    for idx, t in enumerate(plan["tasks"]):
-        raw_role = str(t.get("role") or "story").strip()
-        role = raw_role if raw_role in valid_roles else "story"
-        if role != raw_role:
-            clamped_roles.append({"from": raw_role, "to": role, "index": idx})
-        norm_tasks.append(
-            {
-                "role": role,
-                "goal": (t.get("goal") or goal).strip(),
-            }
-        )
     if clamped_roles:
         clamp_note = "Role validation: " + ", ".join(
             f"task {c['index']} role '{c['from']}' is not valid — ran as {c['to']}"
@@ -574,6 +680,8 @@ async def orchestrate(
             steer_watermark = session_log.steering_max_seq(session_id)
             if steer_lines:
                 goal_i = goal_i + "\nMid-run user steering: " + " / ".join(steer_lines)
+            if choice and role in ("assets", "video"):
+                goal_i = f"{goal_i}\n{format_choice(choice)}"
         if paused:
             # A previous sub-agent asked the user a question — later tasks may
             # depend on the answer, so running them would waste work (and
@@ -621,12 +729,14 @@ async def orchestrate(
             }
         )
         digest = _prior_reports_digest(results)
+        conversation = conversation_for_agent(session_id)
         sub_history: list[dict[str, Any]] = [
             {
                 "role": "user",
                 "content": (
                     f"You are the {role} sub-agent. Goal: {goal_i}\n"
                     f"Project: #{ctx.project_id}.\n"
+                    + (conversation + "\n" if conversation else "")
                     + (digest + "\n" if digest else "")
                     + "Complete your goal with your "
                     "available tools, then reply with a concise summary of what "
@@ -833,7 +943,15 @@ async def _run_sub_agent(
         "run_workflow. Film clips: enqueue_video_jobs with orders (Video #N) "
         "or scene_ids from list_scenes — only the clips they named, never "
         "the whole timeline. Never add_scene to attach an mp4. For "
-        "text-only edits, do the edit and stop."
+        "text-only edits, do the edit and stop. If the task names a CHOSEN "
+        "WORKFLOW, that workflow_id is already decided — call run_workflow "
+        "or enqueue with it, and do not ask which workflow. The conversation "
+        "listed in the task is memory: do not ask the user to repeat a "
+        "decision, and do not call generate_story unless they asked to "
+        "rewrite the story. generate_script builds scenes from the beats. "
+        "When the project has no scenes yet, call it. Do not look for an "
+        "uploaded script with list_files or read_file — that file is not in "
+        "the session folder."
     )
     # Memory + skills + scratch-workspace sections, same content the main loop
     # renders (order 35 / 37 / 32). Rendered ONCE here: a sub-agent lives for

@@ -1032,6 +1032,25 @@ export const ko: Dict = {
 	'settings.comfySection': 'ComfyUI',
 	'settings.comfyLead': 'ComfyUI가 실행되는 위치입니다.',
 	'settings.comfyHint': '이 컴퓨터에서 접근할 수 있어야 합니다.',
+	'settings.comfyApiUrl': 'Comfy API URL',
+	'settings.comfyApiHint':
+		'ComfyUI 앞의 comfy-api-proxy(기본값 http://127.0.0.1:8189). 워크플로 작업은 Comfy SDK로 이 주소에 제출됩니다.',
+	'settings.comfyApiKey': 'Comfy API 키',
+	'settings.comfyApiKeyHint':
+		'Comfy Router(MiniMax H3, FLUX 3)에 필요합니다. 로컬 워크플로에는 필요 없습니다. 비워 두면 저장된 키를 유지하고, 지운 뒤 저장하면 삭제됩니다.',
+	'settings.comfyApiKeySaved': '키 저장됨',
+	'settings.comfyRouterToggle': 'Comfy API 공급자 사용 (Router)',
+	'settings.comfyRouterToggleHint':
+		'켜고 키를 저장하면 프로젝트와 Agent에서 로컬 워크플로와 함께 Comfy Router를 고를 수 있습니다. 끄면 모든 생성이 자신의 ComfyUI에서만 이루어지며, 키가 있어도 Router 선택은 숨겨집니다.',
+	'router.minimaxH3': 'Comfy Router · MiniMax H3',
+	'router.flux3': 'Comfy Router · FLUX 3',
+	'router.fluxHint': '이 항목의 이미지 프롬프트로 Comfy Router의 FLUX 3를 통해 생성합니다.',
+	'router.h3Hint':
+		'MiniMax H3의 참조 이미지입니다. 순서대로 전달됩니다. 이미지 1이 첫 번째입니다. 시작 프레임이 아닙니다.',
+	'router.h3AddImage': '이미지 추가',
+	'router.h3Prompt': '프롬프트',
+	'router.imageN': '이미지 {n}',
+	'router.h3NeedPrompt': '생성하기 전에 프롬프트를 입력하세요.',
 	'settings.storageSection': '시스템 경로',
 	'settings.storageLead': '파일이 저장되는 위치와 에이전트가 작업할 수 있는 위치입니다.',
 	'settings.storageCalloutStrong': '데이터 디렉터리를 변경하면',

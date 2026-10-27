@@ -72,6 +72,53 @@ def test_structured_approval_grants_render(session):
     assert policy.has_structured_approval(ctx, "destructive_replace") is False
 
 
+def test_render_yes_survives_a_later_complaint(session):
+    """The policy used to drop a render card the moment the next line was
+    not itself a generate request. A complaint is not a cancel."""
+    import asyncio
+
+    ctx = _ctx(session)
+    asked = asyncio.run(
+        execute_tool(
+            ctx,
+            "ask_user",
+            {
+                "question": "Generate the 4 images?",
+                "options": ["Yes, generate all 4 now", "No"],
+                "scope": "render",
+            },
+        )
+    )
+    session_log.append_event(
+        session["id"],
+        session_log.QUESTION_ANSWERED,
+        {
+            "question_seq": asked["question_seq"],
+            "answer": "Yes, generate all 4 now",
+            "scope": "render",
+        },
+    )
+    session_log.append_event(
+        session["id"],
+        session_log.USER_MESSAGE,
+        {"content": "Yes, generate all 4 now"},
+    )
+    session_log.append_event(
+        session["id"],
+        session_log.USER_MESSAGE,
+        {"content": "your fucking reasoning is suck like shit!"},
+    )
+    assert policy.has_structured_approval(ctx, "render") is True
+    assert policy.user_allows_render(ctx) is True
+    session_log.append_event(
+        session["id"],
+        session_log.USER_MESSAGE,
+        {"content": "add a character named Mei"},
+    )
+    assert policy.has_structured_approval(ctx, "render") is False
+    assert policy.user_allows_render(ctx) is False
+
+
 def test_structured_approval_negative_answer_grants_nothing(session):
     import asyncio
 

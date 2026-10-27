@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { type Node, type NodeProps } from '@xyflow/svelte';
+	import { Handle, Position, type Node, type NodeProps } from '@xyflow/svelte';
 	import SafeMedia from '$lib/components/SafeMedia.svelte';
 	import Icon from '$lib/components/ui/Icon.svelte';
 	import { assetUrl } from '$lib/api';
@@ -7,8 +7,10 @@
 
 	interface EntityNodeData extends Record<string, unknown> {
 		canvasNodeId: number;
-		entityType: 'character' | 'location' | 'item' | 'scene';
+		entityType: 'character' | 'location' | 'item' | 'scene' | 'clip';
 		title: string;
+		/** `#3.2` — the mention token for a clip card. Absent on other entities. */
+		mention?: string | null;
 		/** Poster image (env image / reference sheet) — shown while not playing. */
 		imagePath: string | null;
 		/** Clip path — when set the card becomes a playable video card. */
@@ -29,6 +31,8 @@
 				return 'folder';
 			case 'scene':
 				return 'film';
+			case 'clip':
+				return 'play';
 		}
 	}
 
@@ -60,8 +64,17 @@
 		if (e.key === 'Enter') activate();
 	}}
 >
+	{#if data.entityType === 'character' || data.entityType === 'location'}
+		<Handle type="source" position={Position.Right} id="asset" isConnectable={false} />
+	{/if}
+	{#if data.entityType === 'clip'}
+		<Handle type="target" position={Position.Left} id="clip" isConnectable={false} />
+	{/if}
 	<header>
 		<Icon name={iconFor(data.entityType)} size={14} />
+		{#if data.mention}
+			<span class="mention">{data.mention}</span>
+		{/if}
 		<span class="title" title={data.title}>{data.title}</span>
 		{#if videoSrc}
 			<span class="play-badge" aria-hidden="true">
@@ -76,7 +89,6 @@
 			<SafeMedia class="media-el" src={posterSrc} alt={data.title} kind="image" controls={false} />
 		{:else if videoSrc}
 			<!-- No poster available: #t=0.1 first-frame thumbnail. -->
-			<!-- svelte-ignore a11y_media_has_caption -->
 			<video
 				class="media-el"
 				src={videoSrc}
@@ -99,6 +111,7 @@
 
 <style>
 .entity-node {
+	position: relative;
 	width: 240px;
 	background: var(--bg-surface);
 	border: 1px solid var(--border);
@@ -124,6 +137,16 @@
 		padding: 9px 12px;
 		color: var(--text-secondary);
 	}
+	.mention {
+		flex-shrink: 0;
+		font-size: 11px;
+		font-weight: 600;
+		letter-spacing: 0.02em;
+		color: var(--text-primary);
+		background: color-mix(in srgb, var(--accent) 28%, transparent);
+		border-radius: 999px;
+		padding: 1px 6px;
+	}
 	.title {
 		flex: 1;
 		min-width: 0;
@@ -133,6 +156,12 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+	.entity-node :global(.svelte-flow__handle) {
+		width: 8px;
+		height: 8px;
+		background: #8b87c9;
+		border: none;
 	}
 	.play-badge {
 		display: inline-flex;

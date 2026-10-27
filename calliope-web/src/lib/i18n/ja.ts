@@ -1032,6 +1032,25 @@ export const ja: Dict = {
 	'settings.comfySection': 'ComfyUI',
 	'settings.comfyLead': 'ComfyUI の実行場所。',
 	'settings.comfyHint': 'このマシンから到達できる必要があります。',
+	'settings.comfyApiUrl': 'Comfy API URL',
+	'settings.comfyApiHint':
+		'ComfyUI の前に置く comfy-api-proxy（既定 http://127.0.0.1:8189）。ワークフローのジョブは Comfy SDK からこの URL へ送られます。',
+	'settings.comfyApiKey': 'Comfy API キー',
+	'settings.comfyApiKeyHint':
+		'Comfy Router（MiniMax H3 と FLUX 3）に必要です。ローカルのワークフローには不要です。空のまま保存すると既存のキーを維持し、消して保存すると削除します。',
+	'settings.comfyApiKeySaved': 'キーを保存済み',
+	'settings.comfyRouterToggle': 'Comfy API プロバイダーを使う（Router）',
+	'settings.comfyRouterToggleHint':
+		'オンにしキーを保存すると、プロジェクトと Agent でローカルのワークフローに加えて Comfy Router を選べます。オフのときはすべて自分の ComfyUI で生成し、キーがあっても Router の選択肢は表示されません。',
+	'router.minimaxH3': 'Comfy Router · MiniMax H3',
+	'router.flux3': 'Comfy Router · FLUX 3',
+	'router.fluxHint': 'このエンティティの画像プロンプトを使い、Comfy Router の FLUX 3 で生成します。',
+	'router.h3Hint':
+		'MiniMax H3 の参照画像です。順番どおり送られます。画像 1 が最初です。開始フレームではありません。',
+	'router.h3AddImage': '画像を追加',
+	'router.h3Prompt': 'プロンプト',
+	'router.imageN': '画像 {n}',
+	'router.h3NeedPrompt': '生成する前にプロンプトを入力してください。',
 	'settings.storageSection': 'システムパス',
 	'settings.storageLead': 'ファイルの保存先と、エージェントの作業場所。',
 	'settings.storageCalloutStrong': 'データディレクトリの変更',
